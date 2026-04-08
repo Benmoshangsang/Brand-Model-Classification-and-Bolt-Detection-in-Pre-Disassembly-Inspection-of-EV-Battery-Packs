@@ -38,7 +38,7 @@ import mmcv
 from mmengine.runner import load_checkpoint
 
 # -------------------------------------------------------
-# 基础配置
+# Basic configuration
 # -------------------------------------------------------
 
 def _cfg(url='', **kwargs):
@@ -102,13 +102,13 @@ default_cfgs = {
 }
 
 # -------------------------------------------------------
-# 工具函数 窗口分割 恢复 权重加载
+# Utility functions: window partition, restoration, and weight loading
 # -------------------------------------------------------
 
 def window_partition(x, window_size):
     B, C, H, W = x.shape
     x = x.view(B, C, H // window_size, window_size, W // window_size, window_size)
-    windows = x.permute(0, 2, 4, 3, 5, 1).reshape(-1, window_size*window_size, C)
+    windows = x.permute(0, 2, 4, 3, 5, 1).reshape(-1, window_size * window_size, C)
     return windows
 
 def window_reverse(windows, window_size, H, W):
@@ -176,7 +176,7 @@ def _load_checkpoint(model, filename, map_location='cpu', strict=False, logger=N
     return checkpoint
 
 # -------------------------------------------------------
-# 归一化与下采样 PatchEmbed
+# Normalization, downsampling, and PatchEmbed
 # -------------------------------------------------------
 
 class LayerNorm2d(nn.LayerNorm):
@@ -214,7 +214,7 @@ class PatchEmbed(nn.Module):
         return x
 
 # -------------------------------------------------------
-# 纯 Mamba Mixer 模块（数值稳健增强）
+# Pure Mamba Mixer module (enhanced numerical stability)
 # -------------------------------------------------------
 
 class MambaVisionMixer(nn.Module):
@@ -249,10 +249,10 @@ class MambaVisionMixer(nn.Module):
         self.layer_idx = layer_idx
 
         self.in_proj = nn.Linear(self.d_model, self.d_inner, bias=bias, **factory_kwargs)    
-        self.x_proj = nn.Linear(self.d_inner//2, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs)
-        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner//2, bias=True, **factory_kwargs)
+        self.x_proj = nn.Linear(self.d_inner // 2, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs)
+        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner // 2, bias=True, **factory_kwargs)
 
-        dt_init_std = self.dt_rank**-0.5 * dt_scale
+        dt_init_std = self.dt_rank ** -0.5 * dt_scale
         if dt_init == "constant":
             nn.init.constant_(self.dt_proj.weight, dt_init_std)
         elif dt_init == "random":
@@ -260,7 +260,7 @@ class MambaVisionMixer(nn.Module):
         else:
             raise NotImplementedError
         dt = torch.exp(
-            torch.rand(self.d_inner//2, **factory_kwargs) * (math.log(dt_max) - math.log(dt_min))
+            torch.rand(self.d_inner // 2, **factory_kwargs) * (math.log(dt_max) - math.log(dt_min))
             + math.log(dt_min)
         ).clamp(min=dt_init_floor)
         inv_dt = dt + torch.log(-torch.expm1(-dt))
@@ -271,29 +271,29 @@ class MambaVisionMixer(nn.Module):
         A = repeat(
             torch.arange(1, self.d_state + 1, dtype=torch.float32, device=device),
             "n -> d n",
-            d=self.d_inner//2,
+            d=self.d_inner // 2,
         ).contiguous()
         A_log = torch.log(A)
         self.A_log = nn.Parameter(A_log)
         self.A_log._no_weight_decay = True
-        self.D = nn.Parameter(torch.ones(self.d_inner//2, device=device))
+        self.D = nn.Parameter(torch.ones(self.d_inner // 2, device=device))
         self.D._no_weight_decay = True
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
         self.conv1d_x = nn.Conv1d(
-            in_channels=self.d_inner//2,
-            out_channels=self.d_inner//2,
+            in_channels=self.d_inner // 2,
+            out_channels=self.d_inner // 2,
             bias=conv_bias,
             kernel_size=self.d_conv,
-            groups=self.d_inner//2,
+            groups=self.d_inner // 2,
             **factory_kwargs,
         )
         self.conv1d_z = nn.Conv1d(
-            in_channels=self.d_inner//2,
-            out_channels=self.d_inner//2,
+            in_channels=self.d_inner // 2,
+            out_channels=self.d_inner // 2,
             bias=conv_bias,
             kernel_size=self.d_conv,
-            groups=self.d_inner//2,
+            groups=self.d_inner // 2,
             **factory_kwargs,
         )
 
@@ -313,19 +313,19 @@ class MambaVisionMixer(nn.Module):
             x_float = x.float()
             z_float = z.float()
 
-            # 1) depthwise conv 分支 + 护栏
+            # 1) depthwise convolution branches + safeguard
             bias_x_float = self.conv1d_x.bias.float() if self.conv1d_x.bias is not None else None
             bias_z_float = self.conv1d_z.bias.float() if self.conv1d_z.bias is not None else None
 
             x_conv = F.conv1d(input=x_float, weight=self.conv1d_x.weight.float(), bias=bias_x_float,
-                              padding='same', groups=self.d_inner//2)
+                              padding='same', groups=self.d_inner // 2)
             z_conv = F.conv1d(input=z_float, weight=self.conv1d_z.weight.float(), bias=bias_z_float,
-                              padding='same', groups=self.d_inner//2)
+                              padding='same', groups=self.d_inner // 2)
 
             x_conv = F.silu(torch.nan_to_num(x_conv))
             z_conv = F.silu(torch.nan_to_num(z_conv))
 
-            # 2) SSM 参数
+            # 2) SSM parameters
             A = -torch.exp(self.A_log.float())
             D = self.D.float()
             delta_bias = self.dt_proj.bias.float()
@@ -336,14 +336,14 @@ class MambaVisionMixer(nn.Module):
             dt_raw, Bp, Cp = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
             dt = self.dt_proj(dt_raw)
 
-            # —— 数值温和裁剪，避免 softplus 前后爆炸
+            # Mild numerical clipping to avoid explosion before or after softplus
             dt = torch.clamp(dt, -6.0, 6.0)
 
             dt = rearrange(dt, "(b l) d -> b d l", l=seqlen)
             Bp = rearrange(Bp, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             Cp = rearrange(Cp, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
 
-            # 3) selective scan + 护栏
+            # 3) selective scan + safeguard
             y = selective_scan_fn(
                 x_conv, dt, A, Bp, Cp, D, z=None,
                 delta_bias=delta_bias,
@@ -352,7 +352,7 @@ class MambaVisionMixer(nn.Module):
             )
             y = torch.nan_to_num(y)
 
-            # 4) 拼接另一路 & 输出投影 + 护栏
+            # 4) Concatenate the other branch, then output projection + safeguard
             y = torch.cat([y, z_conv], dim=1)
             y = rearrange(y, "b d l -> b l d")
             out = self.out_proj(y)
@@ -361,7 +361,7 @@ class MambaVisionMixer(nn.Module):
         return out
 
 # -------------------------------------------------------
-# 单层 MambaBlock 和层级 MambaLayer（添加护栏）
+# Single MambaBlock and hierarchical MambaLayer (with safeguards)
 # -------------------------------------------------------
 
 class MambaBlock(nn.Module):
@@ -394,25 +394,25 @@ class MambaBlock(nn.Module):
         return x * gamma.view(1, 1, -1)
 
     def forward(self, x_tokens: torch.Tensor):
-        # mixer
+        # Mixer
         y = self.mixer(self.norm1(x_tokens))
-        y = torch.nan_to_num(y)  # —— 护栏
+        y = torch.nan_to_num(y)  # Safeguard
         x = x_tokens + self.drop_path(self._scale(y, self.gamma_1))
 
-        # ffn
+        # FFN
         y_ffn = self.ffn(self.norm2(x))
-        y_ffn = torch.nan_to_num(y_ffn)  # —— 护栏
+        y_ffn = torch.nan_to_num(y_ffn)  # Safeguard
         x = x + self.drop_path(self._scale(y_ffn, self.gamma_2))
         return x
 
 class MambaLayer(nn.Module):
     """
-    一个 Stage
-      输入 B C H W
-      窗口分块 -> Bnw win^2 C
-      堆叠 L 个 MambaBlock
-      窗口还原
-      可选下采样
+    One stage
+      Input: B C H W
+      Window partition -> Bnw win^2 C
+      Stack L MambaBlocks
+      Window restoration
+      Optional downsampling
     """
     def __init__(
         self,
@@ -488,13 +488,13 @@ class MambaLayer(nn.Module):
         return x_down if x_down is not None else x_feat, x_feat
 
 # -------------------------------------------------------
-# 顶层骨干 纯 Mamba 版
+# Top-level backbone: pure Mamba version
 # -------------------------------------------------------
 
 class MambaVision(nn.Module):
     """
-    纯 Mamba 主干
-      Stage1..4 使用 MambaLayer
+    Pure Mamba backbone
+      Stage1..4 use MambaLayer
     """
     def __init__(self,
                  dim=128,
@@ -502,16 +502,16 @@ class MambaVision(nn.Module):
                  depths=(3, 3, 10, 5),
                  window_size=(8, 8, 14, 7),
                  mlp_ratio=4.0,
-                 num_heads=None,            # 兼容旧接口 未使用
+                 num_heads=None,            # Kept for compatibility; unused
                  drop_path_rate=0.2,
                  in_chans=3,
                  num_classes=1000,
-                 qkv_bias=True,             # 兼容占位 未使用
-                 qk_scale=None,             # 兼容占位 未使用
+                 qkv_bias=True,             # Compatibility placeholder; unused
+                 qk_scale=None,             # Compatibility placeholder; unused
                  drop_rate=0.0,
-                 attn_drop_rate=0.0,        # 兼容占位 未使用
+                 attn_drop_rate=0.0,        # Compatibility placeholder; unused
                  layer_scale=None,
-                 layer_scale_conv=None,     # 兼容占位 未使用
+                 layer_scale_conv=None,     # Compatibility placeholder; unused
                  use_checkpoint=False,
                  **kwargs):
         super().__init__()
@@ -574,28 +574,28 @@ class MambaVision(nn.Module):
         x = self.norm(feat)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
-        x = torch.nan_to_num(x)  # —— 护栏
+        x = torch.nan_to_num(x)  # Safeguard
         return x
 
     def forward(self, x):
         x = self.forward_features(x)
         x = self.head(x)
-        x = torch.nan_to_num(x)  # —— 护栏
+        x = torch.nan_to_num(x)  # Safeguard
         return x
 
     def _load_state_dict(self, pretrained, strict: bool = False):
         _load_checkpoint(self, pretrained, strict=strict)
 
 # -------------------------------------------------------
-# MMDet MMSeg 适配骨干（注册名：mamba_custom）
+# MMDet / MMSeg compatible backbone (registered name: mamba_custom)
 # -------------------------------------------------------
 
 @MODELS_MMSEG.register_module(name='mamba_custom')
 @MODELS_MMDET.register_module(name='mamba_custom')
 class MambaCustom(MambaVision):
     """
-    适配 MMDetection 和 MMSegmentation 的纯 Mamba 骨干
-    注册名：mamba_custom（避免与现有实现冲突）
+    Pure Mamba backbone adapted for MMDetection and MMSegmentation
+    Registered name: mamba_custom (to avoid conflicts with existing implementations)
     """
     def __init__(self, 
                  dim,
@@ -620,7 +620,7 @@ class MambaCustom(MambaVision):
             use_checkpoint=use_checkpoint,
             **kwargs,
         )
-        self.dims = [int(dim * 2 ** i) for i in range(0,4)]
+        self.dims = [int(dim * 2 ** i) for i in range(0, 4)]
         self.channel_first = True
         _NORMLAYERS = dict(
             ln=nn.LayerNorm,
@@ -635,7 +635,7 @@ class MambaCustom(MambaVision):
             layer_name = f'outnorm{i}'
             self.add_module(layer_name, layer)
 
-        # 分类头在检测/分割骨干中不需要
+        # The classification head is not needed for detection/segmentation backbones
         del self.norm
         del self.head
         self.init_weights(pretrained)
@@ -667,7 +667,7 @@ class MambaCustom(MambaVision):
             if i in self.out_indices:
                 norm_layer = getattr(self, f'outnorm{i}')
                 out = norm_layer(feat)
-                out = torch.nan_to_num(out)  # —— 护栏
+                out = torch.nan_to_num(out)  # Safeguard
                 outs.append(out.contiguous())
         if len(self.out_indices) == 0:
             return x
