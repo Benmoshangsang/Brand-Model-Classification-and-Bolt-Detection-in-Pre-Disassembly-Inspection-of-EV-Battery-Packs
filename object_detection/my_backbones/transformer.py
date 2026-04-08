@@ -6,12 +6,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-# ✅ 只从注册器引入，避免循环导入
+# ✅ Import only from the registry to avoid circular imports
 from mmdet.registry import MODELS
-# ✅ MMDet 3.x 建议继承 BaseModule 以支持 init_cfg/权重初始化
+# ✅ MMDet 3.x recommends inheriting from BaseModule to support init_cfg / weight initialization
 from mmengine.model import BaseModule
 
-# timm DropPath（可选）
+# timm DropPath (optional)
 try:
     from timm.layers import DropPath  # timm>=0.9
 except Exception:
@@ -43,7 +43,7 @@ class LayerNorm2d(nn.Module):
         return x * self.weight[:, None, None] + self.bias[:, None, None]
 
 class PatchEmbed(nn.Module):
-    """简单的两层卷积下采样做 patch 嵌入。可按需替换。"""
+    """A simple two-layer convolutional downsampling module for patch embedding. Replace as needed."""
     def __init__(self, in_chans=3, in_dim=32, dim=80):
         super().__init__()
         self.proj = nn.Sequential(
@@ -67,7 +67,7 @@ class Mlp(nn.Module):
         return self.fc2(self.act(self.fc1(x)))
 
 class AttentionSAC(nn.Module):
-    """占位注意力；请按需替换为你的实现"""
+    """Placeholder attention module; replace with your own implementation if needed."""
     def __init__(self, dim, num_heads=4, qkv_bias=True, qk_norm=False):
         super().__init__()
         self.dw = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
@@ -93,11 +93,11 @@ class TransformerLayer(nn.Module):
 
 @MODELS.register_module()
 class TransformerBackbone(BaseModule):
-    """MMDet 3.3 兼容的自定义 Transformer 骨干
+    """Custom Transformer backbone compatible with MMDet 3.3
 
-    - 继承 BaseModule（支持 init_cfg/Pretrained）
-    - 返回 tuple(outs)
-    - 暴露 out_channels（供 FPN 等使用）
+    - Inherits from BaseModule (supports init_cfg / Pretrained)
+    - Returns tuple(outs)
+    - Exposes out_channels (for use with FPN and similar modules)
     """
     def __init__(self,
                  dim=128,
@@ -107,13 +107,14 @@ class TransformerBackbone(BaseModule):
                  mlp_ratio=4.0,
                  window_size=(8, 8, 14, 7),
                  out_indices=(0, 1, 2, 3),
-                 pretrained=None,          # 兼容旧配置字段
-                 init_cfg=None,            # 建议使用的权重初始化入口
+                 pretrained=None,          # Compatible with legacy config fields
+                 init_cfg=None,            # Recommended entry for weight initialization
                  norm_layer='ln2d',
                  layer_scale=None,
                  use_checkpoint=False,
                  **kwargs):
-        # 兼容：如果传入了 pretrained 而未给 init_cfg，则转成 Pretrained
+        # Compatibility: if pretrained is provided but init_cfg is not,
+        # convert it into a Pretrained init_cfg
         if pretrained is not None and init_cfg is None:
             init_cfg = dict(type='Pretrained', checkpoint=pretrained)
 
@@ -123,7 +124,9 @@ class TransformerBackbone(BaseModule):
         self.out_indices = tuple(out_indices)
         self.depths = tuple(depths)
 
-        # 每个 stage 的层（这里通道保持为 dim；若需要逐步升维，自行修改）
+        # Layers for each stage
+        # The channel dimension is kept as dim here;
+        # if progressive channel expansion is needed, modify accordingly
         self.transformer_layers = nn.ModuleList([
             nn.Sequential(*[
                 TransformerLayer(
@@ -138,7 +141,8 @@ class TransformerBackbone(BaseModule):
 
         self.out_norms = nn.ModuleList([LayerNorm2d(dim) for _ in range(len(depths))])
 
-        # 给 Neck 用的通道声明；如各 stage 通道不同，请改为对应列表
+        # Channel declaration for the Neck;
+        # if stage channels differ, replace this with the corresponding list
         self.out_channels = [dim for _ in range(len(depths))]
 
     def forward(self, x):
