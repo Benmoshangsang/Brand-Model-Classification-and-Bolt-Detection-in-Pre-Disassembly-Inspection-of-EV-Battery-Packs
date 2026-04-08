@@ -1,15 +1,15 @@
 # ========================
-# Dual-Task Detector Config (with brand top1/top5 + macro P/R/F1, det extra metrics)
-# ✅ 已修复：删除了 AdamW 中的 momentum 参数
-# ✅ 已修复：添加了 roi_feat_channels 参数以支持立即创建 FiLM 模块
-# ✅ 已修复：移除了 env_cfg.dist_cfg 中错误的 find_unused_parameters 参数
-# ✅ 已优化：统一了 model.train_cfg.rcnn 中的 sampler 数量
-# ✅【核心修复】修正了 backbone 配置，移除了无效的继承参数
-# ✅【核心修复 & 加速】修正了不合理的超大 window_size
-# ✅【核心加速】禁用了梯度检查点，用显存换取速度
-# ✅【速度优化】将 SyncBN 替换为 GroupNorm，减少多卡通信开销
-# ✅【速度与指标修复】增大默认物理批次大小，并修复自定义评估器在验证时不工作的问题
-# ✅【Backbone 替换】backbone 实现已在 my_backbones/TransNeXt.py 中改为 TransNeXt，但保留类型名 MM_mamba_vision
+# Dual-Task Detector Config (with brand top1/top5 + macro P/R/F1, extra detection metrics)
+# ✅ Fixed: removed the momentum parameter from AdamW
+# ✅ Fixed: added the roi_feat_channels parameter to support immediate creation of the FiLM module
+# ✅ Fixed: removed the incorrect find_unused_parameters parameter from env_cfg.dist_cfg
+# ✅ Optimized: unified the sampler settings in model.train_cfg.rcnn
+# ✅ [Core Fix] corrected the backbone configuration and removed invalid inherited parameters
+# ✅ [Core Fix & Acceleration] corrected the unreasonable oversized window_size
+# ✅ [Core Acceleration] disabled gradient checkpointing, trading memory for speed
+# ✅ [Speed Optimization] replaced SyncBN with GroupNorm to reduce multi-GPU communication overhead
+# ✅ [Speed and Metric Fix] increased the default physical batch size and fixed the issue where the custom evaluator did not work during validation
+# ✅ [Backbone Replacement] the backbone implementation has been changed to TransNeXt in my_backbones/TransNeXt.py, while keeping the type name MM_mamba_vision
 # ========================
 _base_ = [
     '../_base_/models/cascade-rcnn_r50_fpn.py',
@@ -17,7 +17,7 @@ _base_ = [
     '../_base_/default_runtime.py'
 ]
 
-# ===== 数据集配置 =====
+# ===== Dataset configuration =====
 dataset_type = 'CustomCocoDataset'
 data_root = '/root/autodl-tmp/coco_dataset2/'
 backend_args = None
@@ -50,7 +50,7 @@ test_pipeline = [
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'scale_factor', 'brand_id'))
 ]
 
-# ===== 动态 batch size =====
+# ===== Dynamic batch size =====
 from mmengine.dist import get_world_size
 _gpu_count = get_world_size()
 _batch_size_per_gpu = 4
@@ -91,7 +91,7 @@ val_dataloader = dict(
 
 test_dataloader = val_dataloader
 
-# ====== 评估器 ======
+# ====== Evaluators ======
 val_evaluator = [
     dict(
         type='CocoMetric',
@@ -123,20 +123,21 @@ data_preprocessor = dict(
 )
 
 # ========================
-# 模型配置
+# Model configuration
 # ========================
 model = dict(
     type='DualTaskDetector',
     backbone=dict(
         _delete_=True,
-        # 注意：这里的类型仍为 MM_mamba_vision，
-        # 实际实现已经在 my_backbones/TransNeXt.py 中替换为 TransNeXt Backbone
+        # Note: the type here is still MM_mamba_vision,
+        # but the actual implementation has already been replaced
+        # with the TransNeXt Backbone in my_backbones/TransNeXt.py
         type='MM_TransNeXt',
         out_indices=(0, 1, 2, 3),
         pretrained=None,
         depths=(1, 3, 8, 4),
         num_heads=(2, 4, 8, 16),
-        window_size=(8, 8, 8, 8),  # 在 TransNeXt 实现中仅作兼容保留，不再影响结构
+        window_size=(8, 8, 8, 8),  # Kept only for compatibility in the TransNeXt implementation; it no longer affects the structure
         dim=80,
         in_dim=32,
         mlp_ratio=4,
@@ -145,7 +146,8 @@ model = dict(
         layer_scale=None,
         use_checkpoint=False,
 
-        # ===== 保留参数接口以兼容旧配置（TransNeXt 内部会忽略这些开关） =====
+        # ===== Keep the parameter interface for compatibility with old configs
+        # (these switches will be ignored internally by TransNeXt) =====
         enable_pcs=True,
         enable_sac=True,
         enable_sl_bridge=False,
@@ -322,7 +324,7 @@ model = dict(
 )
 
 # ========================
-# 训练与优化
+# Training and optimization
 # ========================
 max_epochs = 20
 train_cfg = dict(
@@ -351,7 +353,8 @@ optim_wrapper = dict(
     )
 )
 
-# 你可以按需改成 TransNeXt 命名，这里保持原路径不变也没问题
+# You can rename this to a TransNeXt-style work_dir if needed;
+# keeping the current path unchanged is also fine
 work_dir = './work_dirs/cascade_mask_rcnn_transnext_tiny_3x_coco128'
 
 model_wrapper_cfg = dict(
@@ -405,7 +408,8 @@ custom_imports = dict(
         'my_metrics.custom_det_extra_evaluator',
         'my_mmdet.datasets.custom_coco_dataset',
         'my_mmdet.data_preprocessors.custom_data_preprocessor',
-        # ⭐ 新增：导入 TransNeXt backbone 文件，注册 MM_mamba_vision（TransNeXt 实现）
+        # ⭐ New: import the TransNeXt backbone file and register MM_mamba_vision
+        # (TransNeXt implementation)
         'my_backbones.TransNeXt'
     ],
     allow_failed_imports=False
