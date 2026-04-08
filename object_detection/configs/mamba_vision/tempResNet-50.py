@@ -1,14 +1,14 @@
 # ========================
-# Dual-Task Detector Config (with brand top1/top5 + macro P/R/F1, det extra metrics)
-# ✅ 已修复：删除了 AdamW 中的 momentum 参数
-# ✅ 已修复：添加了 roi_feat_channels 参数以支持立即创建 FiLM 模块
-# ✅ 已修复：移除了 env_cfg.dist_cfg 中错误的 find_unused_parameters 参数
-# ✅ 已优化：统一了 model.train_cfg.rcnn 中的 sampler 数量
-# ✅【核心修复】修正了 backbone 配置，移除了无效的继承参数
-# ✅【核心修复 & 加速】修正了不合理的超大 window_size
-# ✅【核心加速】禁用了梯度检查点，用显存换取速度
-# ✅【速度优化】将 SyncBN 替换为 GroupNorm，减少多卡通信开销
-# ✅【速度与指标修复】增大默认物理批次大小，并修复自定义评估器在验证时不工作的问题
+# Dual-Task Detector Config (with brand top1/top5 + macro P/R/F1, extra detection metrics)
+# ✅ Fixed: removed the momentum parameter from AdamW
+# ✅ Fixed: added the roi_feat_channels parameter to support immediate creation of the FiLM module
+# ✅ Fixed: removed the incorrect find_unused_parameters parameter from env_cfg.dist_cfg
+# ✅ Optimized: unified the sampler settings in model.train_cfg.rcnn
+# ✅ [Core Fix] corrected the backbone configuration and removed invalid inherited parameters
+# ✅ [Core Fix & Acceleration] corrected the unreasonable oversized window_size
+# ✅ [Core Acceleration] disabled gradient checkpointing, trading memory for speed
+# ✅ [Speed Optimization] replaced SyncBN with GroupNorm to reduce multi-GPU communication overhead
+# ✅ [Speed and Metric Fix] increased the default physical batch size and fixed the issue where the custom evaluator did not work during validation
 # ========================
 _base_ = [
     '../_base_/models/cascade-rcnn_r50_fpn.py',
@@ -16,7 +16,7 @@ _base_ = [
     '../_base_/default_runtime.py'
 ]
 
-# ===== 数据集配置 =====
+# ===== Dataset configuration =====
 dataset_type = 'CustomCocoDataset'
 data_root = '/root/autodl-tmp/coco_dataset2/'
 backend_args = None
@@ -49,7 +49,7 @@ test_pipeline = [
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'scale_factor', 'brand_id'))
 ]
 
-# ===== 动态 batch size =====
+# ===== Dynamic batch size =====
 from mmengine.dist import get_world_size
 _gpu_count = get_world_size()
 _batch_size_per_gpu = 4
@@ -90,7 +90,7 @@ val_dataloader = dict(
 
 test_dataloader = val_dataloader
 
-# ====== 评估器 ======
+# ====== Evaluators ======
 val_evaluator = [
     dict(
         type='CocoMetric',
@@ -122,24 +122,24 @@ data_preprocessor = dict(
 )
 
 # ========================
-# 模型配置
+# Model configuration
 # ========================
 model = dict(
     type='DualTaskDetector',
     backbone=dict(
         _delete_=True,
-        type='MM_resnet50',  # 修改为使用 MM_resnet50 类
+        type='MM_resnet50',  # Changed to use the MM_resnet50 class
         out_indices=(0, 1, 2, 3),
         pretrained=None,
-        norm_layer='ln2d',  # 归一化方式
+        norm_layer='ln2d',  # Normalization method
         norm_eval=False,
         frozen_stages=-1,
         in_chans=3,
-        # 以下是与 ResNet50 配置相关的额外参数
+        # The following are additional parameters related to the ResNet50 configuration
     ),
     neck=dict(
         type='FPN',
-        in_channels=[256, 512, 1024, 2048],  # 根据 ResNet-50 输出通道设置
+        in_channels=[256, 512, 1024, 2048],  # Set according to ResNet-50 output channels
         out_channels=256,
         num_outs=4),
     rpn_head=dict(
@@ -309,7 +309,7 @@ model = dict(
 )
 
 # ========================
-# 训练与优化
+# Training and optimization
 # ========================
 max_epochs = 20
 train_cfg = dict(
@@ -391,7 +391,7 @@ custom_imports = dict(
         'my_metrics.custom_det_extra_evaluator',
         'my_mmdet.datasets.custom_coco_dataset',
         'my_mmdet.data_preprocessors.custom_data_preprocessor',
-        'my_backbones.resnet50'  # 添加了对 resnet50.py 文件的导入
+        'my_backbones.resnet50'  # Added import for the resnet50.py file
     ],
     allow_failed_imports=False
 )
