@@ -172,7 +172,7 @@ class CustomDetExtraEvaluator(BaseMetric):
                 tp_mean_iou = (iou_s / tp) if tp > 0 else 0.0
                 out[f'det/tp_mean_iou@{thr:.2f}'] = float(tp_mean_iou)
 
-        # 可选：给出“跨阈值均值”（如同 COCO 的多阈值平均思想）
+       
         if len(self.iou_thrs) > 1:
             if self.report_cls_acc:
                 vals = [out[f'det/matched_cls_acc@{thr:.2f}'] for thr in self.iou_thrs]
@@ -182,8 +182,8 @@ class CustomDetExtraEvaluator(BaseMetric):
                 out['det/tp_mean_iou@mean'] = float(np.mean(vals))
 
         if len(self.iou_thrs) > 1:
-            # 便于阅读的范围标注
+            
             lo, hi = self.iou_thrs[0], self.iou_thrs[-1]
-            out['det/_iou_range'] = float(lo + (hi - lo))  # 占位，无实际意义，可删
+            out['det/_iou_range'] = float(lo + (hi - lo))  
 
         return out
