@@ -1,14 +1,14 @@
 # ========================
-# Dual-Task Detector Config (with brand top1/top5 + macro P/R/F1, det extra metrics)
-# ✅ 已修复：删除了 AdamW 中的 momentum 参数
-# ✅ 已修复：添加了 roi_feat_channels 参数以支持立即创建 FiLM 模块
-# ✅ 已修复：移除了 env_cfg.dist_cfg 中错误的 find_unused_parameters 参数
-# ✅ 已优化：统一了 model.train_cfg.rcnn 中的 sampler 数量
-# ✅【核心修复】修正了 backbone 配置，移除了无效的继承参数
-# ✅【核心修复 & 加速】修正了不合理的超大 window_size
-# ✅【核心加速】禁用了梯度检查点，用显存换取速度
-# ✅【速度优化】将 SyncBN 替换为 GroupNorm，减少多卡通信开销
-# ✅【速度与指标修复】增大默认物理批次大小，并修复自定义评估器在验证时不工作的问题
+# Dual-Task Detector Config (with brand top1/top5 + macro P/R/F1, extra detection metrics)
+# ✅ Fixed: removed the momentum parameter from AdamW
+# ✅ Fixed: added the roi_feat_channels parameter to support immediate creation of the FiLM module
+# ✅ Fixed: removed the incorrect find_unused_parameters parameter from env_cfg.dist_cfg
+# ✅ Optimized: unified the sampler settings in model.train_cfg.rcnn
+# ✅ [Core Fix] corrected the backbone configuration and removed invalid inherited parameters
+# ✅ [Core Fix & Acceleration] corrected the unreasonable oversized window_size
+# ✅ [Core Acceleration] disabled gradient checkpointing, trading memory for speed
+# ✅ [Speed Optimization] replaced SyncBN with GroupNorm to reduce multi-GPU communication overhead
+# ✅ [Speed and Metric Fix] increased the default physical batch size and fixed the issue where the custom evaluator did not work during validation
 # ========================
 _base_ = [
     '../_base_/models/cascade-rcnn_r50_fpn.py',
@@ -16,7 +16,7 @@ _base_ = [
     '../_base_/default_runtime.py'
 ]
 
-# ===== 数据集配置 =====
+# ===== Dataset configuration =====
 dataset_type = 'CustomCocoDataset'
 data_root = '/root/autodl-tmp/coco_dataset2/'
 backend_args = None
@@ -49,7 +49,7 @@ test_pipeline = [
          meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'scale_factor', 'brand_id'))
 ]
 
-# ===== 动态 batch size =====
+# ===== Dynamic batch size =====
 from mmengine.dist import get_world_size
 _gpu_count = get_world_size()
 _batch_size_per_gpu = 4
@@ -90,7 +90,7 @@ val_dataloader = dict(
 
 test_dataloader = val_dataloader
 
-# ====== 评估器 ======
+# ====== Evaluators ======
 val_evaluator = [
     dict(
         type='CocoMetric',
@@ -122,18 +122,20 @@ data_preprocessor = dict(
 )
 
 # ========================
-# 模型配置
+# Model configuration
 # ========================
 model = dict(
     type='DualTaskDetector',
     backbone=dict(
         _delete_=True,
-        # ▼ 改为自定义 EfficientNet 骨干（已在 my_backbones/EfficientNet.py 中注册为 MM_EfficientNet）
+        # ▼ Changed to the custom EfficientNet backbone
+        # (already registered as MM_EfficientNet in my_backbones/EfficientNet.py)
         type='MM_EfficientNet',
         out_indices=(0, 1, 2, 3),
         pretrained=None,
 
-        # 下列参数与先前 MambaVision 的维度/层数超参保持一致，以匹配 FPN 的 in_channels
+        # The following parameters keep the same dimension / layer-count hyperparameters
+        # as the previous MambaVision setup, to match the FPN in_channels
         depths=(1, 3, 8, 4),
         num_heads=(2, 4, 8, 16),
         window_size=(8, 8, 8, 8),
@@ -143,14 +145,14 @@ model = dict(
         norm_layer='ln2d',
         use_checkpoint=False,
 
-        # ===== CSDS 相关开关（与你的实现保持一致）=====
+        # ===== CSDS-related switches (kept consistent with your implementation) =====
         enable_pcs=True,
         enable_sac=True,
         enable_sl_bridge=False,
     ),
     neck=dict(
         type='FPN',
-        # 与 backbone 的通道进阶 [80,160,320,640] 对齐
+        # Aligned with the backbone channel progression [80,160,320,640]
         in_channels=[80, 160, 320, 640],
         out_channels=256,
         num_outs=4),
@@ -321,7 +323,7 @@ model = dict(
 )
 
 # ========================
-# 训练与优化
+# Training and optimization
 # ========================
 max_epochs = 20
 train_cfg = dict(
@@ -396,7 +398,7 @@ launcher = 'pytorch'
 
 custom_imports = dict(
     imports=[
-        # ▼ 新增：导入自定义 EfficientNet 骨干
+        # ▼ New: import the custom EfficientNet backbone
         'my_backbones.EfficientNet',
 
         'my_models.dual_task_detector',
