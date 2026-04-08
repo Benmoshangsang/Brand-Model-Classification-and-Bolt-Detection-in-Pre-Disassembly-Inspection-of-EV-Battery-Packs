@@ -8,36 +8,36 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-import torch                                            # 导入 PyTorch 主库
-import torch.nn as nn                                   # 导入 PyTorch 神经网络模块
-from timm.models.registry import register_model         # 从 timm 库导入模型注册器
-import math                                             # 导入数学库
-from timm.models.layers import trunc_normal_, DropPath  # 从 timm 导入权重初始化和 DropPath
-from timm.models._builder import resolve_pretrained_cfg # 从 timm 导入预训练配置解析
+import torch                                            # Import the main PyTorch library
+import torch.nn as nn                                   # Import PyTorch neural network modules
+from timm.models.registry import register_model         # Import the model registry from timm
+import math                                             # Import the math library
+from timm.models.layers import trunc_normal_, DropPath  # Import weight initialization and DropPath from timm
+from timm.models._builder import resolve_pretrained_cfg # Import pretrained configuration resolver from timm
 try:
-    from timm.models._builder import _update_default_kwargs as update_args # 尝试导入更新默认参数的函数
+    from timm.models._builder import _update_default_kwargs as update_args # Try to import the function for updating default arguments
 except:
-    from timm.models._builder import _update_default_model_kwargs as update_args # 兼容旧版 timm
-from timm.models.vision_transformer import Mlp, PatchEmbed as TimmPatchEmbed # 从 timm 导入 MLP 和 PatchEmbed
-from timm.models.layers import DropPath, trunc_normal_  # 再次导入 DropPath 和 trunc_normal_
-from timm.models.registry import register_model         # 再次导入模型注册器
-import torch.nn.functional as F                         # 导入 PyTorch 函数库
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn # 从 mamba_ssm 导入核心扫描操作
-from einops import rearrange, repeat                     # 从 einops 导入张量操作工具
-from pathlib import Path                                # 导入路径处理库
-import os                                               # 导入操作系统接口
-from functools import partial                           # 导入偏函数工具
-from typing import Callable, Optional, Tuple            # 导入类型提示
-from torch.utils import checkpoint                      # 导入梯度检查点功能
-from mmengine.model import BaseModule                   # 从 mmengine 导入基础模型模块
-from mmdet.registry import MODELS as MODELS_MMDET       # 从 mmdet 导入模型注册表
-from mmseg.registry import MODELS as MODELS_MMSEG       # 从 mmseg 导入模型注册表
-import mmcv                                             # 导入 mmcv 库
-from mmengine.runner import load_checkpoint             # 从 mmengine 导入加载检查点的函数
-from torch.cuda.amp import autocast                     # 导入 autocast 以控制混合精度
+    from timm.models._builder import _update_default_model_kwargs as update_args # Compatible with older timm versions
+from timm.models.vision_transformer import Mlp, PatchEmbed as TimmPatchEmbed # Import MLP and PatchEmbed from timm
+from timm.models.layers import DropPath, trunc_normal_  # Re-import DropPath and trunc_normal_
+from timm.models.registry import register_model         # Re-import model registry
+import torch.nn.functional as F                         # Import the PyTorch functional API
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn # Import the core scan operation from mamba_ssm
+from einops import rearrange, repeat                    # Import tensor manipulation utilities from einops
+from pathlib import Path                                # Import path handling library
+import os                                               # Import operating system interfaces
+from functools import partial                           # Import partial function utility
+from typing import Callable, Optional, Tuple            # Import type hints
+from torch.utils import checkpoint                      # Import gradient checkpointing
+from mmengine.model import BaseModule                   # Import the base model module from mmengine
+from mmdet.registry import MODELS as MODELS_MMDET       # Import the model registry from mmdet
+from mmseg.registry import MODELS as MODELS_MMSEG       # Import the model registry from mmseg
+import mmcv                                             # Import mmcv
+from mmengine.runner import load_checkpoint             # Import the checkpoint loading function from mmengine
+from torch.cuda.amp import autocast                     # Import autocast for mixed precision control
 
 # -------------------------------------------------------
-# 基础配置（保留）
+# Basic configuration (kept as is)
 # -------------------------------------------------------
 
 def _cfg(url='', **kwargs):
@@ -98,56 +98,56 @@ default_cfgs = {
     'mamba_vision_L3_512_21k': _cfg(url='https://huggingface.co/nvidia/MambaVision-L3-512-21K/resolve/main/mambavision_L3_21k_740m_512.pth.tar',
                             crop_pct=0.93,
                             input_size=(3, 512, 512),
-                            crop_mode='squash'),                               
+                            crop_mode='squash'),
 }
 
 # -------------------------------------------------------
-# 工具函数（窗口分割/恢复、权重加载）
+# Utility functions (window partition/reverse, weight loading)
 # -------------------------------------------------------
 
 def window_partition(x, window_size):
     """
-    将特征图分割成不重叠的窗口。
+    Partition the feature map into non-overlapping windows.
     Args:
-        x: (B, C, H, W) 输入特征图
-        window_size: 窗口大小
+        x: (B, C, H, W) input feature map
+        window_size: window size
     Returns:
-        local window features: (num_windows*B, window_size*window_size, C) 分割后的窗口特征
+        local window features: (num_windows*B, window_size*window_size, C) partitioned window features
     """
-    B, C, H, W = x.shape                                                                      # 获取输入维度
-    x = x.view(B, C, H // window_size, window_size, W // window_size, window_size)           # 重塑为带窗口的视图
-    windows = x.permute(0, 2, 4, 3, 5, 1).reshape(-1, window_size*window_size, C)             # 调整维度并展平
+    B, C, H, W = x.shape                                                                      # Get input dimensions
+    x = x.view(B, C, H // window_size, window_size, W // window_size, window_size)           # Reshape into a windowed view
+    windows = x.permute(0, 2, 4, 3, 5, 1).reshape(-1, window_size*window_size, C)            # Rearrange dimensions and flatten
     return windows
 
 
 def window_reverse(windows, window_size, H, W):
     """
-    将窗口特征恢复为原始特征图。
+    Restore window features back to the original feature map.
     Args:
-        windows: (num_windows*B, window_size*window_size, C) 窗口特征
-        window_size: 窗口大小
-        H, W: 原始特征图的高度和宽度
+        windows: (num_windows*B, window_size*window_size, C) window features
+        window_size: window size
+        H, W: height and width of the original feature map
     Returns:
-        x: (B, C, H, W) 恢复后的特征图
+        x: (B, C, H, W) restored feature map
     """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))                           # 计算原始的 batch size
-    C = windows.shape[-1]                                                                     # 获取通道数
-    x = windows.reshape(B, H // window_size, W // window_size, window_size, window_size, C)   # 重塑为带窗口的视图
-    x = x.permute(0, 5, 1, 3, 2, 4).reshape(B, C, H, W)                                       # 调整维度并恢复
+    B = int(windows.shape[0] / (H * W / window_size / window_size))                           # Compute the original batch size
+    C = windows.shape[-1]                                                                     # Get the number of channels
+    x = windows.reshape(B, H // window_size, W // window_size, window_size, window_size, C)  # Reshape into a windowed view
+    x = x.permute(0, 5, 1, 3, 2, 4).reshape(B, C, H, W)                                       # Rearrange and restore
     return x
 
 
 def _load_state_dict(module, state_dict, strict=False, logger=None):
-    """自定义的权重加载函数，用于处理不完全匹配的 state_dict。"""
-    unexpected_keys = []                                                                      # 未预期的键
-    all_missing_keys = []                                                                     # 所有缺失的键
-    err_msg = []                                                                              # 错误信息
+    """Custom weight loading function for handling partially mismatched state_dict."""
+    unexpected_keys = []                                                                      # Unexpected keys
+    all_missing_keys = []                                                                     # All missing keys
+    err_msg = []                                                                              # Error messages
 
-    metadata = getattr(state_dict, '_metadata', None)                                         # 获取元数据
-    state_dict = state_dict.copy()                                                            # 复制 state_dict
+    metadata = getattr(state_dict, '_metadata', None)                                         # Get metadata
+    state_dict = state_dict.copy()                                                            # Copy state_dict
     if metadata is not None:
         state_dict._metadata = metadata
-    
+
     def load(module, prefix=''):
         local_metadata = {} if metadata is None else metadata.get(
             prefix[:-1], {})
@@ -158,7 +158,7 @@ def _load_state_dict(module, state_dict, strict=False, logger=None):
             if child is not None:
                 load(child, prefix + name + '.')
 
-    load(module)                                                                              # 递归加载
+    load(module)                                                                              # Recursive loading
     load = None
     missing_keys = [
         key for key in all_missing_keys if 'num_batches_tracked' not in key
@@ -171,7 +171,6 @@ def _load_state_dict(module, state_dict, strict=False, logger=None):
         err_msg.append(
             f'missing keys in source state_dict: {", ".join(missing_keys)}\n')
 
-    
     if len(err_msg) > 0:
         err_msg.insert(
             0, 'The model and loaded state dict do not match exactly\n')
@@ -189,8 +188,8 @@ def _load_checkpoint(model,
                     map_location='cpu',
                     strict=False,
                     logger=None):
-    """加载检查点文件并处理其中的 state_dict。"""
-    checkpoint = torch.load(filename, map_location=map_location)                              # 加载文件
+    """Load a checkpoint file and process the state_dict inside it."""
+    checkpoint = torch.load(filename, map_location=map_location)                              # Load file
     if not isinstance(checkpoint, dict):
         raise RuntimeError(
             f'No state_dict found in checkpoint file {filename}')
@@ -200,30 +199,30 @@ def _load_checkpoint(model,
         state_dict = checkpoint['model']
     else:
         state_dict = checkpoint
-    if list(state_dict.keys())[0].startswith('module.'):                                      # 去除 'module.' 前缀
+    if list(state_dict.keys())[0].startswith('module.'):                                      # Remove the 'module.' prefix
         state_dict = {k[7:]: v for k, v in state_dict.items()}
 
-    if sorted(list(state_dict.keys()))[0].startswith('encoder'):                              # 去除 'encoder.' 前缀
+    if sorted(list(state_dict.keys()))[0].startswith('encoder'):                              # Remove the 'encoder.' prefix
         state_dict = {k.replace('encoder.', ''): v for k, v in state_dict.items() if k.startswith('encoder.')}
 
-    _load_state_dict(model, state_dict, strict, logger)                                       # 调用自定义加载函数
+    _load_state_dict(model, state_dict, strict, logger)                                       # Call the custom loading function
     return checkpoint
 
 # -------------------------------------------------------
-# 归一化与下采样、PatchEmbed（保留）
+# Normalization, downsampling, and PatchEmbed (kept)
 # -------------------------------------------------------
 
 class LayerNorm2d(nn.LayerNorm):
-    """2D 版本的 LayerNorm。"""
+    """2D version of LayerNorm."""
     def forward(self, x: torch.Tensor):
         x = x.permute(0, 2, 3, 1)                                                             # (B, C, H, W) -> (B, H, W, C)
-        x = nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps) # 应用 LayerNorm
+        x = nn.functional.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps) # Apply LayerNorm
         x = x.permute(0, 3, 1, 2)                                                             # (B, H, W, C) -> (B, C, H, W)
         return x
 
 
 class Downsample(nn.Module):
-    """下采样模块，使用步长为2的卷积实现。"""
+    """Downsampling module implemented with a stride-2 convolution."""
     def __init__(self,
                  dim,
                  keep_dim=False,
@@ -243,7 +242,7 @@ class Downsample(nn.Module):
 
 
 class PatchEmbed(nn.Module):
-    """将图像转换为 Patch Embeddings。"""
+    """Convert an image into patch embeddings."""
     def __init__(self, in_chans=3, in_dim=64, dim=96):
         super().__init__()
         self.proj = nn.Identity()
@@ -262,11 +261,12 @@ class PatchEmbed(nn.Module):
         return x
 
 # -------------------------------------------------------
-# 旧的 ConvBlock/Mixer/Attention 保留并作为部件复用（Attention 会被增强为 SAC 版本）
+# The old ConvBlock/Mixer/Attention are kept and reused as components
+# (Attention will be enhanced into the SAC version)
 # -------------------------------------------------------
 
 class ConvBlock(nn.Module):
-    """传统的卷积残差块。"""
+    """Traditional convolutional residual block."""
     def __init__(self, dim, drop_path=0., layer_scale=None, kernel_size=3):
         super().__init__()
         self.conv1 = nn.Conv2d(dim, dim, kernel_size=kernel_size, stride=1, padding=1)
@@ -295,11 +295,11 @@ class ConvBlock(nn.Module):
         return x
 
 # -----------------------------
-# 基础 Mamba Mixer（token 序列）—— 【核心错误修复】
+# Base Mamba Mixer (token sequence) — [core bug fix]
 # -----------------------------
 
 class MambaVisionMixer(nn.Module):
-    """Mamba 混合器模块，用于处理 token 序列。"""
+    """Mamba mixer module for processing token sequences."""
     def __init__(
         self,
         d_model,
@@ -314,7 +314,7 @@ class MambaVisionMixer(nn.Module):
         dt_init_floor=1e-4,
         conv_bias=True,
         bias=False,
-        use_fast_path=True, 
+        use_fast_path=True,
         layer_idx=None,
         device=None,
         dtype=None,
@@ -329,7 +329,7 @@ class MambaVisionMixer(nn.Module):
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
         self.use_fast_path = use_fast_path
         self.layer_idx = layer_idx
-        self.in_proj = nn.Linear(self.d_model, self.d_inner, bias=bias, **factory_kwargs)    
+        self.in_proj = nn.Linear(self.d_model, self.d_inner, bias=bias, **factory_kwargs)
         self.x_proj = nn.Linear(
             self.d_inner//2, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs
         )
@@ -360,12 +360,12 @@ class MambaVisionMixer(nn.Module):
         self.D = nn.Parameter(torch.ones(self.d_inner//2, device=device))
         self.D._no_weight_decay = True
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
-        
-        # ✅【核心错误修复】将 conv_bias//2 改为 conv_bias，正确传递布尔值
+
+        # ✅ [Core bug fix] change conv_bias//2 to conv_bias, and correctly pass the boolean value
         self.conv1d_x = nn.Conv1d(
             in_channels=self.d_inner//2,
             out_channels=self.d_inner//2,
-            bias=conv_bias, # 修正错误，直接传递布尔值
+            bias=conv_bias, # Fix the bug: directly pass the boolean value
             kernel_size=d_conv,
             groups=self.d_inner//2,
             **factory_kwargs,
@@ -373,13 +373,13 @@ class MambaVisionMixer(nn.Module):
         self.conv1d_z = nn.Conv1d(
             in_channels=self.d_inner//2,
             out_channels=self.d_inner//2,
-            bias=conv_bias, # 修正错误，直接传递布尔值
+            bias=conv_bias, # Fix the bug: directly pass the boolean value
             kernel_size=d_conv,
             groups=self.d_inner//2,
             **factory_kwargs,
         )
-        
-        # ✅ 【数值稳定性修复】为 LayerNorm 预先创建一个 float32 的版本，以在 autocast 内部使用
+
+        # ✅ [Numerical stability fix] pre-create a float32 LayerNorm version for use inside autocast
         self.ln_x_dbl = nn.LayerNorm(self.dt_rank + self.d_state * 2, dtype=torch.float32)
 
     def forward(self, hidden_states):
@@ -387,40 +387,40 @@ class MambaVisionMixer(nn.Module):
         hidden_states: (B, L, D)
         Returns: (B, L, D)
         """
-        _, seqlen, _ = hidden_states.shape                                     # 获取序列长度
-        xz = self.in_proj(hidden_states)                                       # 输入线性投影
-        xz = rearrange(xz, "b l d -> b d l")                                   # 调整维度以进行1D卷积
-        x, z = xz.chunk(2, dim=1)                                              # 将投影结果分割为x和z两部分
-        
-        # ✅ 【核心修复】: 增强数值稳定性
+        _, seqlen, _ = hidden_states.shape                                     # Get sequence length
+        xz = self.in_proj(hidden_states)                                       # Input linear projection
+        xz = rearrange(xz, "b l d -> b d l")                                   # Rearrange dimensions for 1D convolution
+        x, z = xz.chunk(2, dim=1)                                              # Split the projected result into x and z
+
+        # ✅ [Core fix]: improve numerical stability
         with autocast(enabled=False):
             x_float = x.float()
             z_float = z.float()
-            
-            # ✅【核心错误修复】稳健地处理 bias 可能为 None 的情况
+
+            # ✅ [Core bug fix] robustly handle the case where bias may be None
             bias_x_float = self.conv1d_x.bias.float() if self.conv1d_x.bias is not None else None
             bias_z_float = self.conv1d_z.bias.float() if self.conv1d_z.bias is not None else None
 
-            # 1D 卷积部分
+            # 1D convolution part
             x_conv = F.silu(F.conv1d(input=x_float, weight=self.conv1d_x.weight.float(), bias=bias_x_float, padding='same', groups=self.d_inner//2))
             z_conv = F.silu(F.conv1d(input=z_float, weight=self.conv1d_z.weight.float(), bias=bias_z_float, padding='same', groups=self.d_inner//2))
-            
-            # SSM (状态空间模型) 参数计算
+
+            # SSM (state space model) parameter computation
             A = -torch.exp(self.A_log.float())
             D = self.D.float()
             delta_bias = self.dt_proj.bias.float()
 
-            # 动态参数 (dt, B, C) 的计算
+            # Dynamic parameter computation (dt, B, C)
             x_dbl = self.x_proj(rearrange(x_conv, "b d l -> (b l) d"))
-            
+
             x_dbl = self.ln_x_dbl(x_dbl)
-            
+
             dt, B, C = torch.split(x_dbl, [self.dt_rank, self.d_state, self.d_state], dim=-1)
             dt = rearrange(self.dt_proj(dt), "(b l) d -> b d l", l=seqlen)
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
-            
-            # 选择性扫描核心函数
+
+            # Core selective scan function
             y = selective_scan_fn(
                 x_conv, dt, A, B, C, D, z=None,
                 delta_bias=delta_bias,
@@ -428,26 +428,27 @@ class MambaVisionMixer(nn.Module):
                 return_last_state=None
             )
 
-            # ✅【速度与稳定性优化】在这里增加一道“安全护栏”，防止selective_scan_fn输出NaN或Inf，从而避免梯度爆炸
+            # ✅ [Speed and stability optimization] add a safety guard here to prevent
+            # selective_scan_fn from outputting NaN or Inf, thereby avoiding gradient explosion
             y = torch.nan_to_num(y)
 
-            # 拼接 z
+            # Concatenate z
             y = torch.cat([y, z_conv], dim=1)
 
         y = y.to(dtype=hidden_states.dtype)
         y = rearrange(y, "b d l -> b l d")
         out = self.out_proj(y)
-        
+
         return out
 
 # -----------------------------
-# Attention（增强版，支持外部 Query 偏置）—— SAC 的一部分
+# Attention (enhanced version, supports external query bias) — part of SAC
 # -----------------------------
 
 class AttentionSAC(nn.Module):
     """
-    支持外部 query 偏置（state-aware bias）的局部窗口注意力；
-    兼容 PyTorch SDPA。
+    Local window attention that supports external query bias (state-aware bias);
+    compatible with PyTorch SDPA.
     """
     def __init__(
             self,
@@ -476,7 +477,7 @@ class AttentionSAC(nn.Module):
     def forward(self, x, q_bias_per_head: Optional[torch.Tensor] = None):
         """
         x: (B, N, C)
-        q_bias_per_head: (B, num_heads, head_dim) 或 (1, num_heads, head_dim)
+        q_bias_per_head: (B, num_heads, head_dim) or (1, num_heads, head_dim)
         """
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
@@ -484,8 +485,8 @@ class AttentionSAC(nn.Module):
         q, k = self.q_norm(q), self.k_norm(k)
 
         if q_bias_per_head is not None:
-            # 将状态感知偏置加到每个 token 的 q 上
-            q = q + q_bias_per_head.unsqueeze(-2)  # (B, heads, 1, head_dim) broadcast 到 N
+            # Add the state-aware bias to q of each token
+            q = q + q_bias_per_head.unsqueeze(-2)  # (B, heads, 1, head_dim) broadcast to N
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(
@@ -505,13 +506,13 @@ class AttentionSAC(nn.Module):
         return x
 
 # -------------------------------------------------------
-# SAC：状态感知交叉注意 + 写回门控
+# SAC: state-aware cross attention + write-back gating
 # -------------------------------------------------------
 
 class SACBridge(nn.Module):
     """
-    将 M-Stream（Mamba）状态用于生成 T-Stream 的查询偏置，
-    并用 T-Stream 的聚合特征门控写回 M-Stream。
+    Use the M-Stream (Mamba) state to generate the query bias for T-Stream,
+    and use the aggregated features of T-Stream to gate the write-back to M-Stream.
     """
     def __init__(self, dim, num_heads):
         super().__init__()
@@ -532,14 +533,14 @@ class SACBridge(nn.Module):
 
     def forward(
         self,
-        m_tokens: torch.Tensor,   # (B, N, C) M-Stream 输出
-        t_tokens: torch.Tensor    # (B, N, C) T-Stream 临时输出或输入
+        m_tokens: torch.Tensor,   # (B, N, C) M-Stream output
+        t_tokens: torch.Tensor    # (B, N, C) T-Stream temporary output or input
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # 生成 Query 偏置：来自 M-Stream 的全局状态（均值池化）
+        # Generate query bias: from the global state of M-Stream (mean pooling)
         m_state = m_tokens.mean(dim=1)  # (B, C)
         q_bias = self.q_bias_gen(m_state).view(-1, self.num_heads, self.head_dim)  # (B, H, Dh)
 
-        # 写回门控：来自 T-Stream 的聚合
+        # Write-back gating: from T-Stream aggregation
         t_state = t_tokens.mean(dim=1)  # (B, C)
         gate = self.writeback_gate(t_state)                                      # (B, C)
         write_feat = self.writeback_proj(t_state).unsqueeze(1)                   # (B, 1, C)
@@ -548,11 +549,12 @@ class SACBridge(nn.Module):
         return q_bias, m_tokens_enh
 
 # -------------------------------------------------------
-# PCS-Scan：四向扫描的 Mamba（H/V/diag/anti-diag）
+# PCS-Scan: four-direction Mamba scan (H/V/diag/anti-diag)
 # -------------------------------------------------------
 
 def _diag_indices(w: int):
-    # 生成主对角线顺序的 (row,col) 索引序列（再展平成 token 下标）
+    # Generate the (row, col) index sequence in main diagonal order,
+    # then flatten it into token indices
     inds = []
     for s in range(2*w-1):
         row_start = max(0, s-(w-1))
@@ -565,7 +567,7 @@ def _diag_indices(w: int):
     return inds
 
 def _anti_diag_indices(w: int):
-    # 生成副对角线（右上->左下）顺序
+    # Generate anti-diagonal order (top-right -> bottom-left)
     inds = []
     for s in range(2*w-1):
         row_start = max(0, s-(w-1))
@@ -580,15 +582,20 @@ def _anti_diag_indices(w: int):
 class PCSScanMamba(nn.Module):
     """
     Polarized Cross-Scan SSM:
-    - 将窗口内 token 重排为 4 种序列（水平/垂直/主对角/副对角）分别过 Mamba，
-      以可学习 gate 融合四路输出。
-    - 不额外引入监督或数据修改。
+    - Reorder tokens within a window into 4 sequences
+      (horizontal / vertical / main diagonal / anti-diagonal),
+      pass them through Mamba separately, and fuse the four outputs
+      with a learnable gate.
+    - Does not introduce extra supervision or data modification.
     """
     def __init__(self, dim, d_state=8, d_conv=3, expand=1, window_size=7):
         super().__init__()
         self.dim = dim
         self.window_size = window_size
-        # 四路共享或独立权重：此处采用“权重共享”的 Mamba 基元，前后加上不同的可学习线性实现“极化”差异
+        # Shared or independent weights across four branches:
+        # here a weight-sharing Mamba primitive is used,
+        # with different learnable linear layers before and after
+        # to realize "polarized" differences
         self.pre_h = nn.Linear(dim, dim)
         self.pre_v = nn.Linear(dim, dim)
         self.pre_d = nn.Linear(dim, dim)
@@ -615,21 +622,21 @@ class PCSScanMamba(nn.Module):
         grid = x.view(B, w, w, C)  # (B, w, w, C)
 
         if mode == 'h':
-            # 行优先：原样展平
+            # Row-major order: flatten directly
             y = grid.reshape(B, N, C)
             return y
         elif mode == 'v':
-            # 列优先：转置行列再展平
+            # Column-major order: transpose rows and columns, then flatten
             y = grid.permute(0, 2, 1, 3).contiguous().view(B, N, C)
             return y
         elif mode == 'd':
-            idxs = _diag_indices(w)  # list of (r,c)
+            idxs = _diag_indices(w)  # list of (r, c)
         elif mode == 'a':
             idxs = _anti_diag_indices(w)
         else:
             raise ValueError
 
-        # 根据 idxs 采样
+        # Sample according to idxs
         r_idx = torch.tensor([rc[0] for rc in idxs], device=x.device, dtype=torch.long)
         c_idx = torch.tensor([rc[1] for rc in idxs], device=x.device, dtype=torch.long)
         y = grid[:, r_idx, c_idx, :]  # (B, N, C)
@@ -646,45 +653,48 @@ class PCSScanMamba(nn.Module):
         x_d = self.pre_d(tokens_window)
         x_a = self.pre_a(tokens_window)
 
-        # 重排
+        # Reorder
         rh = self._reorder(x_h, 'h')
         rv = self._reorder(x_v, 'v')
         rd = self._reorder(x_d, 'd')
         ra = self._reorder(x_a, 'a')
 
-        # 速度优化：批处理四路 Mamba 调用
-        # 将四路输入在 batch 维度上拼接，一次性送入 mamba_core
+        # Speed optimization: batch the four Mamba calls
+        # Concatenate the four inputs along the batch dimension
+        # and feed them into mamba_core at once
         r_all = torch.cat([rh, rv, rd, ra], dim=0)   # (4*B, N, C)
-        y_all = self.mamba_core(r_all)               # (4*B, N, C)，只调用一次！
-        yh, yv, yd, ya = torch.chunk(y_all, 4, dim=0) # 将结果分割回四路
+        y_all = self.mamba_core(r_all)               # (4*B, N, C), only one call
+        yh, yv, yd, ya = torch.chunk(y_all, 4, dim=0) # Split the result back into four branches
 
-        # 恢复到原序（对于 h 路原序，其他路我们简单按“对应位置”对齐）
+        # Restore to the original order
+        # (for the h branch it is already in the original order;
+        # for the other branches we simply align them by corresponding positions)
         yh = self.post_h(yh)
         yv = self.post_v(yv)
         yd = self.post_d(yd)
         ya = self.post_a(ya)
 
-        # 极化 gate
+        # Polarization gate
         g = torch.softmax(self.gate_logits, dim=0)  # (4,)
         y = g[0]*yh + g[1]*yv + g[2]*yd + g[3]*ya
         return y  # (B, N, C)
 
 # -------------------------------------------------------
-# CSDSBlock：并行双流 + SAC + 融合 + FFN
+# CSDSBlock: parallel dual-stream + SAC + fusion + FFN
 # -------------------------------------------------------
 
 class CSDSBlock(nn.Module):
     """
-    双流并行：
-      - M-Stream: PCSScanMamba（四向扫描）
-      - T-Stream: 局部窗口注意力（支持 SAC 的 Query 偏置）
+    Dual-stream parallel design:
+      - M-Stream: PCSScanMamba (four-direction scan)
+      - T-Stream: local window attention (supports SAC query bias)
 
-    SAC：
-      - 用 M-Stream 的全局状态生成 T-Stream Query 偏置；
-      - 用 T-Stream 的聚合门控写回 M-Stream 状态。
+    SAC:
+      - Use the global state of M-Stream to generate the T-Stream query bias;
+      - Use the aggregation of T-Stream to gate the write-back to the M-Stream state.
 
-    融合：
-      - 拼接后线性融合，后接前馈。
+    Fusion:
+      - Concatenate, then apply linear fusion, followed by a feed-forward network.
     """
     def __init__(
         self,
@@ -711,19 +721,19 @@ class CSDSBlock(nn.Module):
         self.enable_sac = enable_sac
         self.enable_sl_bridge = enable_sl_bridge
 
-        # 归一化
+        # Normalization
         self.norm_m = norm_layer(dim)
         self.norm_t = norm_layer(dim)
 
-        # 两条分支
+        # Two branches
         self.m_stream = PCSScanMamba(dim, d_state=d_state, d_conv=d_conv, expand=expand, window_size=window_size) \
                         if self.enable_pcs else nn.Identity()
         self.t_stream = AttentionSAC(dim, num_heads=num_heads, qkv_bias=True, qk_norm=False,
                                      attn_drop=attn_drop, proj_drop=drop, norm_layer=norm_layer)
-        # SAC 桥
+        # SAC bridge
         self.sac = SACBridge(dim, num_heads) if self.enable_sac else None
 
-        # 融合
+        # Fusion
         self.fuse = nn.Sequential(
             nn.Linear(2*dim, dim),
             nn.GELU(),
@@ -735,10 +745,10 @@ class CSDSBlock(nn.Module):
         hidden = int(dim * mlp_ratio)
         self.ffn = Mlp(in_features=dim, hidden_features=hidden, act_layer=nn.GELU, drop=drop)
 
-        # 残差
+        # Residual
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-        # 可选 layer scale
+        # Optional layer scale
         self.gamma_1 = nn.Parameter(layer_scale * torch.ones(dim)) if (layer_scale is not None and isinstance(layer_scale,(int,float))) else None
         self.gamma_2 = nn.Parameter(layer_scale * torch.ones(dim)) if (layer_scale is not None and isinstance(layer_scale,(int,float))) else None
 
@@ -749,64 +759,66 @@ class CSDSBlock(nn.Module):
 
     def forward(self, x_tokens: torch.Tensor, sl_bridge_state: Optional[torch.Tensor] = None):
         """
-        x_tokens: (B, N, C) 是窗口内 token
-        sl_bridge_state: (B, C) or None，来自上一个 Stage 的记忆桥
+        x_tokens: (B, N, C) tokens inside a window
+        sl_bridge_state: (B, C) or None, memory bridge from the previous stage
         """
         B, N, C = x_tokens.shape
 
-        # SL-Bridge：用来自上一 stage 的状态做轻度调制（FiLM-like）
+        # SL-Bridge: use the state from the previous stage for light modulation (FiLM-like)
         if self.enable_sl_bridge and sl_bridge_state is not None:
             alpha = 0.1
             x_tokens = x_tokens + alpha * sl_bridge_state.unsqueeze(1)
 
-        # 两流并行（先对输入各自归一化）
+        # Dual-stream parallel processing (normalize the input separately first)
         xm = self.norm_m(x_tokens)
         xt = self.norm_t(x_tokens)
 
-        # 先走 M-Stream，得到初始 M token
+        # Run M-Stream first to get the initial M tokens
         if self.enable_pcs:
-            y_m0 = self.m_stream(xm)  # (B,N,C)
+            y_m0 = self.m_stream(xm)  # (B, N, C)
         else:
-            y_m0 = xm  # 关闭 PCS 时旁路
+            y_m0 = xm  # Bypass when PCS is disabled
 
-        # SAC 路由与注意力
+        # SAC routing and attention
         if self.enable_sac:
-            q_bias, y_m_enh = self.sac(y_m0, xt)  # q_bias: (B,H,Dh); y_m_enh: (B,N,C)
-            y_t = self.t_stream(xt, q_bias_per_head=q_bias)  # (B,N,C)
+            q_bias, y_m_enh = self.sac(y_m0, xt)  # q_bias: (B, H, Dh); y_m_enh: (B, N, C)
+            y_t = self.t_stream(xt, q_bias_per_head=q_bias)  # (B, N, C)
         else:
             y_m_enh = y_m0
             y_t = self.t_stream(xt, q_bias_per_head=None)
 
-        # 融合
-        y = torch.cat([y_m_enh, y_t], dim=-1)  # (B,N,2C)
-        y = self.fuse(y)                       # (B,N,C)
+        # Fusion
+        y = torch.cat([y_m_enh, y_t], dim=-1)  # (B, N, 2C)
+        y = self.fuse(y)                       # (B, N, C)
 
-        # 残差1
+        # Residual 1
         x1 = x_tokens + self.drop_path(self._scale(y, self.gamma_1))
 
         # FFN
         y_ffn = self.ffn(self.norm_ffn(x1))
-        out = x1 + self.drop_path(self._scale(y_ffn, self.gamma_2))  # (B,N,C)
+        out = x1 + self.drop_path(self._scale(y_ffn, self.gamma_2))  # (B, N, C)
 
-        # 输出同时返回当前 block 的 M-Stream 状态（池化后）供 SL-Bridge 汇聚
-        m_state = y_m_enh.mean(dim=1)  # (B,C)
+        # Also return the current block's M-Stream state (after pooling)
+        # for SL-Bridge aggregation
+        m_state = y_m_enh.mean(dim=1)  # (B, C)
         return out, m_state
 
 # -------------------------------------------------------
-# Stage（层级）—— 【核心修复】增加数值稳定性防护
+# Stage (hierarchical level) — [core fix] add numerical stability protection
 # -------------------------------------------------------
 
 class CSDSLayer(nn.Module):
     """
-    一个 Stage：
-      - 输入 (B,C,H,W)
-      - 窗口分块 -> (B*num_windows, win^2, C)
-      - 堆叠 L 个 CSDSBlock（每个返回局部 M 状态）
-      - 将所有窗口恢复到 (B,C,H,W)
-      - 降采样到下一 stage，并返回：
-          * x_down: (B, C_out, H/2, W/2) 作为下一 stage 输入
-          * x_res:  (B, C, H, W)         作为当前 stage 输出特征
-          * sl_state_stage: (B, C)       本 stage 聚合的 M 状态（供下个 stage 的 SL-Bridge）
+    One stage:
+      - Input (B, C, H, W)
+      - Window partition -> (B*num_windows, win^2, C)
+      - Stack L CSDSBlocks (each returns a local M state)
+      - Restore all windows back to (B, C, H, W)
+      - Downsample to the next stage, and return:
+          * x_down: (B, C_out, H/2, W/2) as input to the next stage
+          * x_res:  (B, C, H, W) as the output feature of the current stage
+          * sl_state_stage: (B, C) aggregated M state of this stage
+            (used for the SL-Bridge of the next stage)
     """
     def __init__(
         self,
@@ -825,7 +837,7 @@ class CSDSLayer(nn.Module):
         d_conv=3,
         expand=1,
         use_checkpoint=False,
-        prev_dim: Optional[int] = None, # ✅ 新增：接收上一层的维度用于预创建投影层
+        prev_dim: Optional[int] = None, # ✅ New: receive the previous stage dimension to pre-create the projection layer
         enable_pcs: bool = True,
         enable_sac: bool = True,
         enable_sl_bridge: bool = True,
@@ -863,23 +875,24 @@ class CSDSLayer(nn.Module):
             ) for i in range(depth)
         ])
 
-        # 【DDP鲁棒性修复】预先创建跨 stage 状态投影层
+        # [DDP robustness fix] pre-create the cross-stage state projection layer
         if prev_dim is not None and self.enable_sl_bridge:
             self.sl_proj_in = nn.Linear(prev_dim, self.dim)
         else:
-            self.sl_proj_in = None # 第一个 stage 或禁用 SL-Bridge 时没有输入状态
+            self.sl_proj_in = None # No input state in the first stage or when SL-Bridge is disabled
 
         self.sl_proj_agg = nn.Linear(dim, dim)
 
     def forward(self, x: torch.Tensor, sl_bridge_state: Optional[torch.Tensor] = None):
         """
-        x: (B,C,H,W)
-        sl_bridge_state: (B,C_prev) 来自上一 Stage 的记忆状态，通道可能与本 stage 不同
+        x: (B, C, H, W)
+        sl_bridge_state: (B, C_prev) memory state from the previous stage;
+                         the channel dimension may differ from the current stage
         """
         B, C, H, W = x.shape
         ws = self.window_size
 
-        # 变形为窗口 token
+        # Transform into window tokens
         pad_r = (ws - W % ws) % ws
         pad_b = (ws - H % ws) % ws
         if pad_r > 0 or pad_b > 0:
@@ -890,19 +903,19 @@ class CSDSLayer(nn.Module):
 
         tokens = window_partition(x, ws)  # (Bnw, ws*ws, C)
 
-        # 若有跨 stage 状态，先做线性调制后传给 block
+        # If there is a cross-stage state, first linearly modulate it before passing it to the block
         if sl_bridge_state is not None and self.sl_proj_in is not None:
             target_dtype = self.sl_proj_in.weight.dtype
             sl_bridge_state_casted = sl_bridge_state.to(dtype=target_dtype)
             sl = self.sl_proj_in(sl_bridge_state_casted)
 
-            # 将 sl 展开匹配到每个窗口 batch：Bnw = B * (Hp/ws) * (Wp/ws)
+            # Expand sl to match every window batch: Bnw = B * (Hp/ws) * (Wp/ws)
             num_wins = tokens.shape[0] // B
             sl = sl.repeat_interleave(num_wins, dim=0)  # (Bnw, self.dim)
         else:
             sl = None
 
-        # 通过多个 CSDSBlock
+        # Pass through multiple CSDSBlocks
         m_states = []
         for blk in self.blocks:
             if self.training and self.use_checkpoint:
@@ -911,41 +924,42 @@ class CSDSLayer(nn.Module):
                 tokens, m_state_blk = blk(tokens, sl_bridge_state=sl)
             m_states.append(m_state_blk)
 
-        # 恢复成特征图
-        x_feat = window_reverse(tokens, ws, Hp, Wp)  # (B,C,Hp,Wp)
+        # Restore into feature map
+        x_feat = window_reverse(tokens, ws, Hp, Wp)  # (B, C, Hp, Wp)
         if pad_r > 0 or pad_b > 0:
             x_feat = x_feat[:, :, :H, :W].contiguous()
-        
-        # 数值稳定性
+
+        # Numerical stability
         x_feat = torch.nan_to_num(x_feat)
 
-        # 聚合本 stage 的记忆状态（对所有窗口或块做平均）
+        # Aggregate the memory state of this stage (average over all windows or blocks)
         if len(m_states) > 0:
             m_last = m_states[-1]  # (Bnw, C)
             num_wins = m_last.shape[0] // B
-            m_last = m_last.view(B, num_wins, -1).mean(dim=1)  # (B,C)
-            sl_state_stage = self.sl_proj_agg(m_last)          # (B,C)
+            m_last = m_last.view(B, num_wins, -1).mean(dim=1)  # (B, C)
+            sl_state_stage = self.sl_proj_agg(m_last)          # (B, C)
         else:
             sl_state_stage = torch.zeros(B, C, device=x.device, dtype=x.dtype)
-        
+
         sl_state_stage = torch.nan_to_num(sl_state_stage)
 
-        # 下采样
+        # Downsampling
         x_down = self.downsample(x_feat) if self.downsample is not None else None
         if x_down is not None:
             x_down = torch.nan_to_num(x_down)
-        
+
         return x_down if x_down is not None else x_feat, x_feat, sl_state_stage
 
 # -------------------------------------------------------
-# 顶层骨干：CSDS-Backbone
+# Top-level backbone: CSDS-Backbone
 # -------------------------------------------------------
 
 class MambaVision(nn.Module):
     """
-    CSDS-Backbone（替换原 MambaVision）：
-      - Stage1/2/3/4：CSDSLayer
-      - 跨 Stage 的 SL-Bridge：将上一 stage 输出的 sl_state 传入下一 stage
+    CSDS-Backbone (replacing the original MambaVision):
+      - Stage1/2/3/4: CSDSLayer
+      - Cross-stage SL-Bridge: pass the sl_state output of the previous stage
+        into the next stage
     """
 
     def __init__(self,
@@ -974,7 +988,7 @@ class MambaVision(nn.Module):
         self.num_classes = num_classes
         self.patch_embed = PatchEmbed(in_chans=in_chans, in_dim=in_dim, dim=dim)
 
-        # DropPath 分配
+        # DropPath allocation
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
 
         # Stages
@@ -1033,11 +1047,11 @@ class MambaVision(nn.Module):
         return {'rpb'}
 
     def forward_features(self, x):
-        x = self.patch_embed(x)   # (B,C,H,W)
+        x = self.patch_embed(x)   # (B, C, H, W)
         sl_state = None
         for idx, level in enumerate(self.levels):
-            x, feat, sl_state = level(x, sl_bridge_state=sl_state)  # x: next stage input; feat: current feat
-        # 最后一层输出 feat 的通道即 num_features
+            x, feat, sl_state = level(x, sl_bridge_state=sl_state)  # x: next stage input; feat: current feature
+        # The channel dimension of feat from the last stage is num_features
         x = self.norm(feat)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
@@ -1052,14 +1066,14 @@ class MambaVision(nn.Module):
         _load_checkpoint(self, pretrained, strict=strict)
 
 # -------------------------------------------------------
-# MMDet/MMseg 适配骨干
+# MMDet/MMseg compatible backbone
 # -------------------------------------------------------
 
 @MODELS_MMSEG.register_module()
 @MODELS_MMDET.register_module()
 class MM_mamba_vision(MambaVision):
-    """适配 MMDetection 和 MMSegmentation 的 MambaVision 骨干网络。"""
-    def __init__(self, 
+    """MambaVision backbone adapted for MMDetection and MMSegmentation."""
+    def __init__(self,
                  dim,
                  in_dim,
                  depths,
@@ -1075,7 +1089,7 @@ class MM_mamba_vision(MambaVision):
                  enable_sac: bool = True,
                  enable_sl_bridge: bool = True,
                  **kwargs):
-        # ✅ 将 use_checkpoint 与各开关传递给父类
+        # ✅ Pass use_checkpoint and all switches to the parent class
         super().__init__(
             dim=dim,
             in_dim=in_dim,
@@ -1097,15 +1111,15 @@ class MM_mamba_vision(MambaVision):
             ln2d=LayerNorm2d,
             bn=nn.BatchNorm2d,
         )
-        norm_layer: nn.Module = _NORMLAYERS.get(norm_layer.lower(), None)        
-        
+        norm_layer: nn.Module = _NORMLAYERS.get(norm_layer.lower(), None)
+
         self.out_indices = out_indices
         for i in out_indices:
             layer = norm_layer(self.dims[i])
             layer_name = f'outnorm{i}'
             self.add_module(layer_name, layer)
 
-        # 顶层分类头不需要
+        # Top classification head is not needed
         del self.norm
         del self.head
         self.init_weights(pretrained)
@@ -1113,30 +1127,30 @@ class MM_mamba_vision(MambaVision):
     def load_pretrained(self, ckpt=None, key="state_dict"):
         if ckpt is None:
             return
-        
+
         try:
             _ckpt = torch.load(open(ckpt, "rb"), map_location=torch.device("cpu"))
             print(f"Successfully load ckpt {ckpt}")
             incompatibleKeys = self.load_state_dict(_ckpt[key], strict=False)
-            print(incompatibleKeys)        
+            print(incompatibleKeys)
         except Exception as e:
             print(f"Failed loading checkpoint form {ckpt}: {e}")
-    
+
     def init_weights(self, pretrained=None):
-        """初始化骨干网络的权重。"""
+        """Initialize the weights of the backbone network."""
         if isinstance(pretrained, str):
             load_checkpoint(self, pretrained, strict=False)
         elif pretrained is None:
-            # 这里的父类 apply(_init_weights) 已经在 MambaVision.__init__ 中调用了
+            # The parent class apply(_init_weights) has already been called in MambaVision.__init__
             pass
         else:
             raise TypeError('pretrained must be a str or None')
 
     def forward(self, x):
         """
-        前向传播，返回多尺度特征图列表。
+        Forward propagation that returns a list of multi-scale feature maps.
         """
-        x = self.patch_embed(x)  # (B,C,H,W)
+        x = self.patch_embed(x)  # (B, C, H, W)
 
         outs = []
         sl_state = None
@@ -1149,5 +1163,5 @@ class MM_mamba_vision(MambaVision):
 
         if len(self.out_indices) == 0:
             return x
-        
+
         return outs
