@@ -138,7 +138,7 @@ custom_imports = dict(
         'my_metrics.custom_brand_evaluator',
         'my_mmdet.datasets.custom_coco_dataset',
         'my_mmdet.data_preprocessors.custom_data_preprocessor',
-        'my_utils.ocr_utils'  # ✅ 加入 OCR 特征提取模块
+        'my_utils.ocr_utils'  
     ],
     allow_failed_imports=False
 )
