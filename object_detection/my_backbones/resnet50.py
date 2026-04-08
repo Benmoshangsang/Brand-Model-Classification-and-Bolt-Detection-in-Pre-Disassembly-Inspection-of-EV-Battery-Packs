@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 # Copyright (c) 2025
-# 说明：本文件将原始 MambaVision 骨干替换为 ResNet-50 骨干，并提供 MMDet / MMSeg 适配器。
-# 依赖：torch, torchvision, mmengine, mmdet, mmseg
+# Note: This file replaces the original MambaVision backbone with a ResNet-50 backbone
+# and provides MMDet / MMSeg adapters.
+# Dependencies: torch, torchvision, mmengine, mmdet, mmseg
 
 import os
 import math
@@ -16,12 +17,14 @@ import torch.nn.functional as F
 
 from torch.cuda.amp import autocast
 
-# ---- timm 仅用于兼容导入（如项目里其他模块需要），本实现不依赖 timm 的模型 ----
+# ---- timm is only imported for compatibility
+# (e.g., if other modules in the project require it).
+# This implementation does not depend on timm models. ----
 try:
     from timm.models.registry import register_model  # noqa: F401
     from timm.models.layers import trunc_normal_, DropPath  # noqa: F401
 except Exception:
-    # 提供最小兜底实现，确保文件独立可用
+    # Provide minimal fallback implementations to make this file usable independently
     def register_model(fn):
         return fn
     def trunc_normal_(tensor, std=0.02):
@@ -30,22 +33,22 @@ except Exception:
         def __init__(self, drop_prob=0.0): super().__init__()
         def forward(self, x): return x
 
-# ---- torchvision ResNet 导入 ----
+# ---- torchvision ResNet imports ----
 from torchvision.models.resnet import ResNet, Bottleneck
 from torchvision.models import resnet50
 
-# ---- MM 引擎/注册表 ----
+# ---- MM engine / registries ----
 from mmengine.runner import load_checkpoint
 from mmengine.model import BaseModule
 from mmdet.registry import MODELS as MODELS_MMDET
 from mmseg.registry import MODELS as MODELS_MMSEG
 
 # -------------------------------------------------------
-# 工具函数（权重加载，保持与原文件一致的接口）
+# Utility functions (weight loading, keeping the same interface as the original file)
 # -------------------------------------------------------
 
 def _load_state_dict(module, state_dict, strict=False, logger=None):
-    """自定义的权重加载函数，用于处理不完全匹配的 state_dict。"""
+    """Custom weight loading function for handling partially mismatched state_dict."""
     unexpected_keys = []
     all_missing_keys = []
     err_msg = []
@@ -93,7 +96,7 @@ def _load_checkpoint(model,
                      map_location='cpu',
                      strict=False,
                      logger=None):
-    """加载检查点文件并处理其中的 state_dict。"""
+    """Load a checkpoint file and process the state_dict inside it."""
     checkpoint = torch.load(filename, map_location=map_location)
     if not isinstance(checkpoint, dict):
         raise RuntimeError(f'No state_dict found in checkpoint file {filename}')
@@ -103,7 +106,7 @@ def _load_checkpoint(model,
         state_dict = checkpoint['model']
     else:
         state_dict = checkpoint
-    # 去除常见前缀
+    # Remove common prefixes
     def strip_prefix(sd, prefix):
         if any(k.startswith(prefix) for k in sd.keys()):
             return {k[len(prefix):] if k.startswith(prefix) else k: v for k, v in sd.items()}
@@ -111,7 +114,7 @@ def _load_checkpoint(model,
     if list(state_dict.keys())[0].startswith('module.'):
         state_dict = {k[7:]: v for k, v in state_dict.items()}
 
-    # 兼容一些常见保存方式
+    # Compatible with several common saving formats
     for pfx in ['backbone.', 'model.', 'encoder.', 'resnet.', 'net.']:
         state_dict = strip_prefix(state_dict, pfx)
 
@@ -119,11 +122,11 @@ def _load_checkpoint(model,
     return checkpoint
 
 # -------------------------------------------------------
-# 基础归一化（与原文件一致接口，供适配层选择）
+# Basic normalization (same interface as the original file, for adapter layer selection)
 # -------------------------------------------------------
 
 class LayerNorm2d(nn.LayerNorm):
-    """2D 版本的 LayerNorm（通道维度做 LN）。"""
+    """2D version of LayerNorm (applies LN over the channel dimension)."""
     def forward(self, x: torch.Tensor):
         x = x.permute(0, 2, 3, 1)  # (B, C, H, W) -> (B, H, W, C)
         x = nn.functional.layer_norm(
@@ -133,16 +136,16 @@ class LayerNorm2d(nn.LayerNorm):
         return x
 
 # -------------------------------------------------------
-# ResNet-50 骨干（可选分类头）
+# ResNet-50 backbone (optional classification head)
 # -------------------------------------------------------
 
 class ResNet50Backbone(nn.Module):
     """
-    标准 ResNet-50 骨干：
-      - forward_features：返回最终全局特征（分类向量）
-      - forward：返回 logits（若 num_classes>0），或返回特征
-      - extract_features：返回 [C2, C3, C4, C5]
-    通道设定：C2=256, C3=512, C4=1024, C5=2048
+    Standard ResNet-50 backbone:
+      - forward_features: returns the final global feature vector
+      - forward: returns logits (if num_classes > 0), otherwise returns features
+      - extract_features: returns [C2, C3, C4, C5]
+    Channel settings: C2=256, C3=512, C4=1024, C5=2048
     """
     def __init__(self,
                  in_chans: int = 3,
@@ -152,10 +155,10 @@ class ResNet50Backbone(nn.Module):
                  frozen_stages: int = -1):
         super().__init__()
 
-        # —— 方案A：不保留 self.resnet，仅用局部变量提取需要的层 ——
+        # —— Option A: do not keep self.resnet, only use a local variable to extract required layers ——
         res: ResNet = resnet50(weights=None)
 
-        # 适配输入通道
+        # Adapt input channels
         if in_chans != 3:
             conv1 = nn.Conv2d(in_chans, 64, kernel_size=7, stride=2, padding=3, bias=False)
             with torch.no_grad():
@@ -166,18 +169,18 @@ class ResNet50Backbone(nn.Module):
         self.norm_eval = norm_eval
         self.frozen_stages = frozen_stages
 
-        # 仅把需要的模块挂到当前类上
+        # Only attach the required modules to the current class
         self.stem = nn.Sequential(res.conv1, res.bn1, res.relu, res.maxpool)
         self.layer1 = res.layer1  # 256
         self.layer2 = res.layer2  # 512
         self.layer3 = res.layer3  # 1024
         self.layer4 = res.layer4  # 2048
 
-        # 分类头
+        # Classification head
         self.avgpool = res.avgpool
         self.fc = nn.Linear(2048, num_classes) if num_classes > 0 else nn.Identity()
 
-        # 初始化（保持与 torchvision 一致）
+        # Initialization (consistent with torchvision)
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -218,7 +221,7 @@ class ResNet50Backbone(nn.Module):
 
     def extract_features(self, x) -> List[torch.Tensor]:
         """
-        返回多尺度特征 [C2, C3, C4, C5]
+        Return multi-scale features [C2, C3, C4, C5]
         """
         x = self.stem(x)
         c2 = self.layer1(x)          # 256
@@ -229,7 +232,7 @@ class ResNet50Backbone(nn.Module):
 
     def forward_features(self, x):
         """
-        返回最终全局特征向量（分类前）
+        Return the final global feature vector (before classification)
         """
         feats = self.extract_features(x)
         c5 = feats[-1]
@@ -239,7 +242,7 @@ class ResNet50Backbone(nn.Module):
 
     def forward(self, x):
         """
-        若 num_classes>0 返回 logits；否则返回全局特征向量
+        If num_classes > 0, return logits; otherwise return the global feature vector
         """
         x = self.forward_features(x)
         x = self.fc(x)
@@ -249,16 +252,16 @@ class ResNet50Backbone(nn.Module):
         _load_checkpoint(self, pretrained, strict=strict)
 
 # -------------------------------------------------------
-# MMDet/MMseg 适配骨干
+# MMDet / MMseg adapter backbone
 # -------------------------------------------------------
 
 @MODELS_MMSEG.register_module()
 @MODELS_MMDET.register_module()
 class MM_resnet50(ResNet50Backbone):
     """
-    适配 MMDetection / MMSegmentation 的 ResNet-50 骨干。
-      - out_indices 指定输出 [C2,C3,C4,C5]
-      - 可选输出归一化：'ln2d' / 'bn' / 'ln'
+    ResNet-50 backbone adapted for MMDetection / MMSegmentation.
+      - out_indices specifies outputs among [C2, C3, C4, C5]
+      - optional output normalization: 'ln2d' / 'bn' / 'ln'
     """
     def __init__(self,
                  in_chans: int = 3,
@@ -329,28 +332,29 @@ class MM_resnet50(ResNet50Backbone):
         for i in self.out_indices:
             norm_layer = getattr(self, f'outnorm{i}')
             f = feats[i]
-            # 重要：优先判断 LayerNorm2d，避免二次转置
+            # Important: check LayerNorm2d first to avoid double transpose
             if isinstance(norm_layer, LayerNorm2d):
                 f = norm_layer(f)
             elif isinstance(norm_layer, nn.LayerNorm):
-                # 纯 nn.LayerNorm 需要把通道放到最后一维
+                # Pure nn.LayerNorm requires channels to be moved to the last dimension
                 f = f.permute(0, 2, 3, 1)  # (B,C,H,W)->(B,H,W,C)
                 f = norm_layer(f)
                 f = f.permute(0, 3, 1, 2)  # (B,H,W,C)->(B,C,H,W)
             else:
-                # BN 等直接用
+                # Use directly for BN and similar layers
                 f = norm_layer(f)
             outs.append(f.contiguous())
         return outs if len(self.out_indices) > 0 else c5
 
 # -------------------------------------------------------
-# （可选）分类版导出：与 timm 风格一致的 register（如需）
+# (Optional) classification export: consistent with timm-style register
 # -------------------------------------------------------
 
 @register_model
 def resnet50_cls(pretrained=False, **kwargs):
     """
-    返回分类用 ResNet-50（保持本文件的实现，非 timm 内置）。
+    Return a ResNet-50 for classification using the implementation in this file,
+    not the built-in timm version.
     """
     model = ResNet50Backbone(
         in_chans=kwargs.pop('in_chans', 3),
@@ -364,12 +368,12 @@ def resnet50_cls(pretrained=False, **kwargs):
     return model
 
 # -------------------------------------------------------
-# 用法示例（注释）：
-# 1) 作为通用分类骨干：
+# Usage examples (comments):
+# 1) As a general classification backbone:
 #    model = ResNet50Backbone(in_chans=3, num_classes=1000)
 #    logits = model(torch.randn(2,3,224,224))
 #
-# 2) 作为 MMDet / MMSeg 骨干：
+# 2) As an MMDet / MMSeg backbone:
 #    backbone = MM_resnet50(in_chans=3, out_indices=(0,1,2,3), norm_layer='ln2d', pretrained=None)
-#    c2,c3,c4,c5 = backbone(torch.randn(1,3,640,640))
+#    c2, c3, c4, c5 = backbone(torch.randn(1,3,640,640))
 # -------------------------------------------------------
