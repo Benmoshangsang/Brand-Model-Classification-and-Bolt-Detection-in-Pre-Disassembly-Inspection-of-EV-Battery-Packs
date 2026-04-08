@@ -5,21 +5,21 @@ from mmengine.registry import MODELS
 class CustomDetDataPreprocessor(DetDataPreprocessor):
     def forward(self, data, training=False):
         """
-        自定义 DataPreprocessor，兼容 MMEngine 的 tuple 输出要求。
+        Custom DataPreprocessor compatible with MMEngine's tuple output requirement.
 
         Args:
-            data (dict): 包含 'inputs' 和 'data_samples' 字段，
-                         'inputs' 是图像张量或元数据，
-                         'data_samples' 是 DetDataSample 对象的列表。
-            training (bool): 是否训练模式。
+            data (dict): Contains the 'inputs' and 'data_samples' fields,
+                         where 'inputs' is the image tensor or metadata,
+                         and 'data_samples' is a list of DetDataSample objects.
+            training (bool): Whether the model is in training mode.
 
         Returns:
             tuple: (inputs, data_samples)
-                - inputs: Tensor[B, C, H, W]，已标准化图像张量。
-                - data_samples: List[DetDataSample]，每张图像的标注与 metainfo，
-                                包含 brand_id、gt_instances（bbox 与 label）。
+                - inputs: Tensor[B, C, H, W], the normalized image tensor.
+                - data_samples: List[DetDataSample], annotations and metainfo for each image,
+                                including brand_id and gt_instances (bbox and label).
         """
         out_dict = super().forward(data, training)
-        inputs = out_dict['inputs']            # 图像张量
-        data_samples = out_dict['data_samples']  # 标注数据（含 brand_id）
+        inputs = out_dict['inputs']               # Image tensor
+        data_samples = out_dict['data_samples']   # Annotation data (including brand_id)
         return inputs, data_samples
