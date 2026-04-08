@@ -39,9 +39,7 @@ To install the necessary dependencies, ensure you have a CUDA-enabled environmen
 5.1 Environment Setup
 Follow the MMDetection Installation Guide to set up the base environment and install the required mamba-ssm dependencies.
 5.2 Training
-# Navigate to the project directory
 cd object_detection
-# Start the multi-task training process
 python cocotrain8.py --config configs/mamba_vision/temp.py
 5.3 Evaluation
 Our evaluation suite provides a comprehensive analysis beyond standard accuracy metrics, focusing on industrial reliability:
