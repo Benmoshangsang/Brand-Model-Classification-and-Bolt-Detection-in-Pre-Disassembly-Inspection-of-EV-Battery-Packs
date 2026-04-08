@@ -6,7 +6,7 @@ from typing import Optional, Dict, Tuple
 from mmengine.model import BaseModule
 from mmdet.registry import MODELS
 
-# 这个打印是为了验证实际 import 的是不是这一份文件
+# This print statement is used to verify if this specific file is being imported correctly
 print("[LOAD CHECK] using NEW Shared2FCBrandHead (fp32 proto branch + safe cosine)", flush=True)
 
 
@@ -16,27 +16,27 @@ def _cosine_sim(a: Tensor, b: Tensor, eps: float = 1e-6) -> Tensor:
 
     a: (B, D)
     b: (K, D)
-    return: (B, K) cosine similarities
+    Returns: (B, K) cosine similarities
     """
-    # normalize with eps so zero vectors don't explode
+    # Normalize with eps to prevent division by zero for zero vectors
     a_n = F.normalize(a, dim=-1, eps=eps)
     b_n = F.normalize(b, dim=-1, eps=eps)
 
-    # clean any weird fp16 underflow NaN / inf
+    # Clean any unexpected fp16 underflow NaN / inf values
     a_n = torch.nan_to_num(a_n, nan=0.0, posinf=0.0, neginf=0.0)
     b_n = torch.nan_to_num(b_n, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # cosine = dot of normalized vectors
+    # Cosine similarity is the dot product of normalized vectors
     sim = a_n @ b_n.t()  # (B, K)
 
-    # clamp tiny drift outside [-1, 1]
+    # Clamp minor numerical drifts outside the [-1, 1] range
     sim = sim.clamp(min=-1.0, max=1.0)
 
     return sim
 
 
 class _StateConditioner(nn.Module):
-    """Map state -> (gamma, beta) for FiLM on a vector (B, C)."""
+    """Maps a state vector to (gamma, beta) for FiLM operations on a vector (B, C)."""
     def __init__(self, state_dim: int, target_dim: int, hidden: int = 256):
         super().__init__()
         self.net = nn.Sequential(
@@ -53,8 +53,8 @@ class _StateConditioner(nn.Module):
 
 class _FourDirSqueeze(nn.Module):
     """
-    Four-direction squeeze over a feature map (B, C, H, W).
-    Produces a fused global vector (B, C) and optional FiLM params.
+    Performs four-direction squeezing over a feature map (B, C, H, W).
+    Produces a fused global vector (B, C) and optional FiLM parameters.
     """
     def __init__(self, c: int, hidden: int = 256, make_film: bool = True):
         super().__init__()
@@ -62,13 +62,13 @@ class _FourDirSqueeze(nn.Module):
         self.gate_mlp = nn.Sequential(
             nn.Linear(4 * c, hidden),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden, 4)  # gates for 4 directions
+            nn.Linear(hidden, 4)  # Softmax gates for the 4 directions
         )
         if make_film:
             self.film_mlp = nn.Sequential(
                 nn.Linear(4 * c, hidden),
                 nn.ReLU(inplace=True),
-                nn.Linear(hidden, 2 * c)  # gamma, beta
+                nn.Linear(hidden, 2 * c)  # gamma, beta output
             )
 
     @staticmethod
@@ -85,7 +85,7 @@ class _FourDirSqueeze(nn.Module):
         L = min(H, W)
         i = torch.arange(L, device=x.device)
         j = (W - 1) - i
-        # handle rectangular maps
+        # Handle rectangular feature maps
         if H < W:
             i = i[:H]
             j = j[:H]
@@ -94,15 +94,16 @@ class _FourDirSqueeze(nn.Module):
 
     def forward(self, feat_map: Tensor) -> Tuple[Tensor, Optional[Tensor], Optional[Tensor]]:
         """
-        feat_map: (B, C, H, W)
-        returns:
-          fused: (B, C)
-          gamma: (B, C) or None
-          beta:  (B, C) or None
+        Args:
+            feat_map: (B, C, H, W)
+        Returns:
+            fused: (B, C) fused feature vector
+            gamma: (B, C) or None for FiLM scaling
+            beta:  (B, C) or None for FiLM shifting
         """
         B, C, H, W = feat_map.shape
 
-        # four directional summaries
+        # Compute four directional summaries: Horizontal, Vertical, Diagonal, Anti-diagonal
         v_h = feat_map.mean(dim=3).mean(dim=2)  # (B, C)
         v_v = feat_map.mean(dim=2).mean(dim=3)  # (B, C)
         v_d = self._diag_pool(feat_map)         # (B, C)
@@ -111,7 +112,7 @@ class _FourDirSqueeze(nn.Module):
         V = torch.stack([v_h, v_v, v_d, v_a], dim=1)   # (B, 4, C)
         V_cat = V.reshape(B, 4 * C)                    # (B, 4C)
 
-        gate_logits = self.gate_mlp(V_cat)             # (B, 4)
+        gate_logits = self.gate_mlp(V_cat)              # (B, 4)
         gate = F.softmax(gate_logits, dim=-1).unsqueeze(-1)  # (B, 4, 1)
 
         fused = (V * gate).sum(dim=1)                  # (B, C)
@@ -128,28 +129,28 @@ class _FourDirSqueeze(nn.Module):
 class Shared2FCBrandHead(BaseModule):
     """
     SCM-Brand Head
-      - 2FC baseline for image-level brand classification
-      - Optional State-conditioned FiLM on vector x
-      - Optional Four-direction channel squeeze + gating on feature map
-      - Optional Prototype-assisted logit fusion (cosine logits)
+      - 2FC baseline for image-level brand classification.
+      - Optional State-conditioned FiLM on vector x.
+      - Optional Four-direction channel squeeze + gating on feature maps.
+      - Optional Prototype-assisted logit fusion (cosine similarity logits).
     """
     def __init__(self,
-                 in_channels: int = 512,         # match GAP / pooled ROI dim
+                 in_channels: int = 512,         # Matches GAP or pooled ROI dimension
                  fc_out_channels: int = 1024,
                  num_classes: int = 7,
-                 # optional mechanisms
+                 # Optional mechanism toggles
                  use_state_condition: bool = True,
                  state_dim: Optional[int] = None,
                  state_hidden: int = 256,
                  use_four_dir_squeeze: bool = True,
                  fourdir_hidden: int = 256,
                  film_from_fourdir: bool = True,
-                 # prototype branch is OFF by default for stability
+                 # Prototype branch is OFF by default for numerical stability
                  use_prototype_branch: bool = False,
                  proto_dim: Optional[int] = None,
-                 proto_tau: float = 10.0,        # temperature multiplier
-                 proto_lambda: float = 0.3,      # fusion weight
-                 # loss
+                 proto_tau: float = 10.0,        # Temperature multiplier
+                 proto_lambda: float = 0.3,      # Fusion weight for the prototype branch
+                 # Loss configuration
                  loss_cls: dict = dict(type='CrossEntropyLoss',
                                        use_sigmoid=False,
                                        loss_weight=1.0),
@@ -160,13 +161,13 @@ class Shared2FCBrandHead(BaseModule):
         self.fc_out_channels = fc_out_channels
         self.num_classes = num_classes
 
-        # 2FC trunk
+        # 2FC trunk architecture
         self.fc1 = nn.Linear(in_channels, fc_out_channels)
         self.relu = nn.ReLU(inplace=True)
         self.fc2 = nn.Linear(fc_out_channels, fc_out_channels)
         self.fc_cls = nn.Linear(fc_out_channels, num_classes)
 
-        # State-conditioned FiLM
+        # State-conditioned FiLM setup
         self.use_state_condition = use_state_condition
         self.state_dim = state_dim if state_dim is not None else in_channels
         if self.use_state_condition:
@@ -176,7 +177,7 @@ class Shared2FCBrandHead(BaseModule):
                 hidden=state_hidden
             )
 
-        # Four-direction squeeze
+        # Four-direction squeeze setup
         self.use_four_dir_squeeze = use_four_dir_squeeze
         self.film_from_fourdir = film_from_fourdir
         if self.use_four_dir_squeeze:
@@ -185,34 +186,34 @@ class Shared2FCBrandHead(BaseModule):
                 hidden=fourdir_hidden,
                 make_film=film_from_fourdir
             )
-            # map fused global signal back into x's channel space
+            # Map fused global signal back into the x channel space
             self.fused_proj = nn.Linear(in_channels, in_channels)
 
-        # Prototype-assisted logits
+        # Prototype-assisted logits setup
         self.use_prototype_branch = use_prototype_branch
         self.proto_dim = proto_dim if proto_dim is not None else fc_out_channels
         self.proto_tau = proto_tau
         self.proto_lambda = proto_lambda
 
         if self.use_prototype_branch:
-            # K x D learnable prototypes in same space as feat after 2FC
+            # K x D learnable prototypes in the same space as features after the 2FC trunk
             self.prototypes = nn.Parameter(torch.empty(num_classes, self.proto_dim))
             nn.init.normal_(self.prototypes, std=0.02)
         else:
-            # give it a dummy attr so code that inspects still works
+            # Assign dummy attribute for compatibility during inspection
             self.prototypes = None
 
-        # classification loss builder
+        # Build classification loss module
         self.loss_cls = MODELS.build(loss_cls)
 
-    # helper ---------------------------------------------------------------
+    # helpers ---------------------------------------------------------------
 
     def _apply_film_on_vec(self, x: Tensor,
                            gamma: Optional[Tensor],
                            beta: Optional[Tensor]) -> Tensor:
         if gamma is None or beta is None:
             return x
-        # FiLM: x * (1 + gamma) + beta
+        # FiLM formula: x * (1 + gamma) + beta
         return x * (1.0 + gamma) + beta
 
     # forward --------------------------------------------------------------
@@ -223,37 +224,39 @@ class Shared2FCBrandHead(BaseModule):
                 state: Optional[Tensor] = None,
                 feat_map: Optional[Tensor] = None) -> Tensor:
         """
-        x:        (B, C) from GAP or pooled ROI
-        state:    (B, S) optional state vector
-        feat_map: (B, C, H, W) optional spatial feature map
+        Args:
+            x:        (B, C) feature vector from GAP or pooled ROI.
+            state:    (B, S) optional state vector for conditioning.
+            feat_map: (B, C, H, W) optional spatial feature map.
         """
 
-        # 1) optional state-conditioned FiLM on x
+        # 1) Optional state-conditioned FiLM on input x
         if self.use_state_condition and state is not None:
             gamma_s, beta_s = self.state_cond(state)  # (B, C), (B, C)
             x = self._apply_film_on_vec(x, gamma_s, beta_s)
 
-        # 2) optional four-direction squeeze branch
+        # 2) Optional four-direction squeeze branch
         if self.use_four_dir_squeeze and feat_map is not None:
             fused, gamma_f, beta_f = self.fourdir(feat_map)  # (B, C), (B, C)?, (B, C)?
-            # fuse global directional context back into x
+            # Fuse global directional context back into x
             x = x + self.fused_proj(fused)
-            # optionally FiLM again using four-dir stats
+            # Optionally apply FiLM again using four-dir statistics
             if self.film_from_fourdir and gamma_f is not None and beta_f is not None:
                 x = self._apply_film_on_vec(x, gamma_f, beta_f)
 
-        # ---- 2FC trunk ----
+        # ---- 2FC Trunk ----
         feat = self.relu(self.fc1(x))
         feat = self.relu(self.fc2(feat))          # (B, D=fc_out_channels)
         cls_fc = self.fc_cls(feat)                # (B, num_classes)
 
         # Prototype-assisted logits branch
         if self.use_prototype_branch:
-            # do prototype branch in stable fp32, detached from AMP
+            # Perform prototype logic in stable fp32, detached from AMP (Automatic Mixed Precision)
             with torch.cuda.amp.autocast(enabled=False):
                 feat32 = feat.float()
                 proto32 = self.prototypes.float()
 
+                # Robustness check for NaNs/Infs
                 feat32 = torch.nan_to_num(
                     feat32, nan=0.0, posinf=0.0, neginf=0.0
                 )
@@ -261,7 +264,7 @@ class Shared2FCBrandHead(BaseModule):
                     proto32, nan=0.0, posinf=0.0, neginf=0.0
                 )
 
-                logits_proto32 = _cosine_sim(feat32, proto32)  # (B, K) fp32
+                logits_proto32 = _cosine_sim(feat32, proto32)  # (B, K) result in fp32
 
                 tau32 = torch.tensor(
                     self.proto_tau,
@@ -273,9 +276,10 @@ class Shared2FCBrandHead(BaseModule):
                 )
                 tau32 = tau32.clamp(min=0.01, max=100.0)
 
-                logits_proto32 = tau32 * logits_proto32  # temperature scale
+                logits_proto32 = tau32 * logits_proto32  # Temperature scaling
 
             logits_proto = logits_proto32.to(cls_fc.dtype)
+            # Residual-like fusion of FC logits and prototype cosine logits
             cls_score = cls_fc + self.proto_lambda * logits_proto
         else:
             cls_score = cls_fc
@@ -289,27 +293,27 @@ class Shared2FCBrandHead(BaseModule):
              labels: Tensor,
              reduction_override: Optional[str] = None) -> Dict[str, Tensor]:
         """
-        Compute CE loss on brand class.
+        Compute Cross-Entropy loss for the brand class.
         """
-        # empty batch guard for distributed corner cases
+        # Empty batch guard for distributed training corner cases
         if cls_score.numel() == 0:
             return {'loss_brand_cls': cls_score.new_tensor(0.)}
 
-        # make sure labels are long
+        # Ensure labels are Long tensors
         if not isinstance(labels, Tensor):
             labels = torch.tensor(labels, dtype=torch.long,
                                   device=cls_score.device)
         elif labels.dtype != torch.long:
             labels = labels.to(dtype=torch.long)
 
-        # compute loss
+        # Compute classification loss
         loss_cls = self.loss_cls(
             cls_score,
             labels,
             reduction_override=reduction_override
         )
 
-        # nan_to_num so one exploding sample doesn't kill all ranks
+        # Apply nan_to_num to prevent a single exploding sample from crashing all ranks in DDP
         loss_cls = torch.nan_to_num(
             loss_cls,
             nan=0.0,
@@ -324,7 +328,7 @@ class Shared2FCBrandHead(BaseModule):
                 state: Optional[Tensor] = None,
                 feat_map: Optional[Tensor] = None) -> Tensor:
         """
-        Predict softmax brand probabilities.
+        Predict brand probabilities using softmax.
         """
         return self.forward(
             x,
