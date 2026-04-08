@@ -8,33 +8,33 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-import torch                                            # 导入 PyTorch 主库
-import torch.nn as nn                                   # 导入 PyTorch 神经网络模块
-from timm.models.registry import register_model         # 从 timm 库导入模型注册器
-import math                                             # 导入数学库
-from timm.models.layers import trunc_normal_, DropPath  # 从 timm 导入权重初始化和 DropPath
-from timm.models._builder import resolve_pretrained_cfg # 从 timm 导入预训练配置解析
+import torch                                            # Import the main PyTorch library
+import torch.nn as nn                                   # Import PyTorch neural network modules
+from timm.models.registry import register_model         # Import the model registry from timm
+import math                                             # Import the math library
+from timm.models.layers import trunc_normal_, DropPath  # Import weight initialization and DropPath from timm
+from timm.models._builder import resolve_pretrained_cfg # Import pretrained configuration resolver from timm
 try:
-    from timm.models._builder import _update_default_kwargs as update_args # 尝试导入更新默认参数的函数
+    from timm.models._builder import _update_default_kwargs as update_args # Try to import the function for updating default arguments
 except:
-    from timm.models._builder import _update_default_model_kwargs as update_args # 兼容旧版 timm
-from timm.models.vision_transformer import Mlp, PatchEmbed as TimmPatchEmbed # 从 timm 导入 MLP 和 PatchEmbed
-from timm.models.layers import DropPath, trunc_normal_  # 再次导入 DropPath 和 trunc_normal_
-from timm.models.registry import register_model         # 再次导入模型注册器
-import torch.nn.functional as F                         # 导入 PyTorch 函数库
-from pathlib import Path                                # 导入路径处理库
-import os                                               # 导入操作系统接口
-from functools import partial                           # 导入偏函数工具
-from typing import Callable, Optional, Tuple            # 导入类型提示
-from torch.utils import checkpoint                      # 导入梯度检查点功能
-from mmengine.model import BaseModule                   # 从 mmengine 导入基础模型模块
-from mmdet.registry import MODELS as MODELS_MMDET       # 从 mmdet 导入模型注册表
-from mmseg.registry import MODELS as MODELS_MMSEG       # 从 mmseg 导入模型注册表
-import mmcv                                             # 导入 mmcv 库
-from mmengine.runner import load_checkpoint             # 从 mmengine 导入加载检查点的函数
+    from timm.models._builder import _update_default_model_kwargs as update_args # Compatible with older timm versions
+from timm.models.vision_transformer import Mlp, PatchEmbed as TimmPatchEmbed # Import MLP and PatchEmbed from timm
+from timm.models.layers import DropPath, trunc_normal_  # Re-import DropPath and trunc_normal_
+from timm.models.registry import register_model         # Re-import the model registry
+import torch.nn.functional as F                         # Import the PyTorch functional API
+from pathlib import Path                                # Import the path handling library
+import os                                               # Import the operating system interface
+from functools import partial                           # Import the partial function utility
+from typing import Callable, Optional, Tuple            # Import type hints
+from torch.utils import checkpoint                      # Import gradient checkpointing
+from mmengine.model import BaseModule                   # Import the base model module from mmengine
+from mmdet.registry import MODELS as MODELS_MMDET       # Import the model registry from mmdet
+from mmseg.registry import MODELS as MODELS_MMSEG       # Import the model registry from mmseg
+import mmcv                                             # Import the mmcv library
+from mmengine.runner import load_checkpoint             # Import the checkpoint loading function from mmengine
 
 # -------------------------------------------------------
-# 基础配置（可以按需更新为 TransNeXt 的权重 URL）
+# Basic configuration (can be updated to TransNeXt weight URLs if needed)
 # -------------------------------------------------------
 
 def _cfg(url='', **kwargs):
@@ -51,7 +51,8 @@ def _cfg(url='', **kwargs):
             }
 
 
-# 这里仅保留占位 default_cfg，可根据实际 TransNeXt 预训练权重自行补充 URL
+# Only placeholder default_cfg entries are kept here.
+# You can fill in actual TransNeXt pretrained weight URLs as needed.
 default_cfgs = {
     'transnext_tiny': _cfg(
         crop_pct=1.0,
@@ -68,17 +69,17 @@ default_cfgs = {
 }
 
 # -------------------------------------------------------
-# 工具函数（窗口分割/恢复、权重加载）
+# Utility functions (window partition/reverse, weight loading)
 # -------------------------------------------------------
 
 def window_partition(x, window_size):
     """
-    将特征图分割成不重叠的窗口。
+    Partition the feature map into non-overlapping windows.
     Args:
-        x: (B, C, H, W) 输入特征图
-        window_size: 窗口大小
+        x: (B, C, H, W) input feature map
+        window_size: window size
     Returns:
-        local window features: (num_windows*B, window_size*window_size, C) 分割后的窗口特征
+        local window features: (num_windows*B, window_size*window_size, C) partitioned window features
     """
     B, C, H, W = x.shape
     x = x.view(B, C, H // window_size, window_size, W // window_size, window_size)
@@ -88,13 +89,13 @@ def window_partition(x, window_size):
 
 def window_reverse(windows, window_size, H, W):
     """
-    将窗口特征恢复为原始特征图。
+    Restore window features back to the original feature map.
     Args:
-        windows: (num_windows*B, window_size*window_size, C) 窗口特征
-        window_size: 窗口大小
-        H, W: 原始特征图的高度和宽度
+        windows: (num_windows*B, window_size*window_size, C) window features
+        window_size: window size
+        H, W: height and width of the original feature map
     Returns:
-        x: (B, C, H, W) 恢复后的特征图
+        x: (B, C, H, W) restored feature map
     """
     B = int(windows.shape[0] / (H * W / window_size / window_size))
     C = windows.shape[-1]
@@ -104,7 +105,7 @@ def window_reverse(windows, window_size, H, W):
 
 
 def _load_state_dict(module, state_dict, strict=False, logger=None):
-    """自定义的权重加载函数，用于处理不完全匹配的 state_dict。"""
+    """Custom weight loading function for handling partially mismatched state_dict."""
     unexpected_keys = []
     all_missing_keys = []
     err_msg = []
@@ -155,7 +156,7 @@ def _load_checkpoint(model,
                     map_location='cpu',
                     strict=False,
                     logger=None):
-    """加载检查点文件并处理其中的 state_dict。"""
+    """Load a checkpoint file and process the state_dict inside it."""
     checkpoint = torch.load(filename, map_location=map_location)
     if not isinstance(checkpoint, dict):
         raise RuntimeError(
@@ -180,11 +181,11 @@ def _load_checkpoint(model,
     return checkpoint
 
 # -------------------------------------------------------
-# 归一化与下采样、PatchEmbed
+# Normalization, downsampling, and PatchEmbed
 # -------------------------------------------------------
 
 class LayerNorm2d(nn.LayerNorm):
-    """2D 版本的 LayerNorm。"""
+    """2D version of LayerNorm."""
     def forward(self, x: torch.Tensor):
         x = x.permute(0, 2, 3, 1)  # (B, C, H, W) -> (B, H, W, C)
         x = nn.functional.layer_norm(
@@ -195,7 +196,7 @@ class LayerNorm2d(nn.LayerNorm):
 
 
 class Downsample(nn.Module):
-    """下采样模块，使用步长为2的卷积实现。"""
+    """Downsampling module implemented with a stride-2 convolution."""
     def __init__(self,
                  dim,
                  keep_dim=False,
@@ -215,7 +216,7 @@ class Downsample(nn.Module):
 
 
 class PatchEmbed(nn.Module):
-    """将图像转换为 Patch Embeddings（与原代码保持一致，用两次 stride=2 卷积实现 1/4 下采样）。"""
+    """Convert an image into patch embeddings (kept consistent with the original code, using two stride=2 convolutions for 1/4 downsampling)."""
     def __init__(self, in_chans=3, in_dim=64, dim=96):
         super().__init__()
         self.proj = nn.Identity()
@@ -234,15 +235,15 @@ class PatchEmbed(nn.Module):
         return x
 
 # -------------------------------------------------------
-# TransNeXt 组件：ConvGLU + Aggregated Attention
+# TransNeXt components: ConvGLU + Aggregated Attention
 # -------------------------------------------------------
 
 class ConvGLU(nn.Module):
     """
-    卷积版 GLU 通道混合器：
-      - 1x1 卷积 -> 2 * hidden_dim
-      - 分成 (u, v)，对 u 做深度卷积建模局部信息
-      - 用 v 的非线性作为 gate
+    Convolutional GLU channel mixer:
+      - 1x1 convolution -> 2 * hidden_dim
+      - Split into (u, v), apply depthwise convolution on u to model local information
+      - Use the nonlinearity of v as the gate
     """
     def __init__(self, dim, hidden_dim: Optional[int] = None):
         super().__init__()
@@ -268,10 +269,10 @@ class ConvGLU(nn.Module):
 
 class AggregatedAttention(nn.Module):
     """
-    TransNeXt 风格的 Aggregated Attention（简化版）：
-      - 为每个阶段引入若干可学习的聚合 token；
-      - 对 [agg_tokens, x] 做标准自注意力；
-      - 只回写空间 token 对应的输出。
+    TransNeXt-style Aggregated Attention (simplified version):
+      - Introduces several learnable aggregate tokens for each stage;
+      - Applies standard self-attention on [agg_tokens, x];
+      - Writes back only the outputs corresponding to spatial tokens.
     """
     def __init__(
         self,
@@ -283,7 +284,7 @@ class AggregatedAttention(nn.Module):
         proj_drop: float = 0.,
     ):
         super().__init__()
-        assert dim % num_heads == 0, "dim 必须能被 num_heads 整除"
+        assert dim % num_heads == 0, "dim must be divisible by num_heads"
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -295,7 +296,7 @@ class AggregatedAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-        # 聚合 token（全局可学习）
+        # Aggregate tokens (globally learnable)
         self.agg_tokens = nn.Parameter(torch.zeros(1, num_agg_tokens, dim))
         trunc_normal_(self.agg_tokens, std=.02)
 
@@ -310,7 +311,7 @@ class AggregatedAttention(nn.Module):
         # (B, C, H, W) -> (B, N, C)
         x_tokens = x.flatten(2).transpose(1, 2)
 
-        # 拼上聚合 token: (B, num_agg+N, C)
+        # Concatenate aggregate tokens: (B, num_agg+N, C)
         agg = self.agg_tokens.expand(B, -1, -1)
         x_all = torch.cat([agg, x_tokens], dim=1)
         L = x_all.shape[1]
@@ -329,21 +330,21 @@ class AggregatedAttention(nn.Module):
         attn_out = self.proj(attn_out)
         attn_out = self.proj_drop(attn_out)
 
-        # 丢弃聚合 token，只保留空间 token 部分
+        # Discard aggregate tokens and keep only the spatial token part
         attn_out = attn_out[:, self.num_agg_tokens:, :]  # (B, N, C)
         attn_out = attn_out.transpose(1, 2).reshape(B, C, H, W)
         return attn_out
 
 # -------------------------------------------------------
-# TransNeXt Block 与 Stage
+# TransNeXt Block and Stage
 # -------------------------------------------------------
 
 class TransNeXtBlock(nn.Module):
     """
-    TransNeXt 基本块：
+    Basic TransNeXt block:
       - LayerNorm2d + Aggregated Attention
       - LayerNorm2d + ConvGLU
-      - 支持 DropPath 和 LayerScale
+      - Supports DropPath and LayerScale
     """
     def __init__(
         self,
@@ -385,13 +386,13 @@ class TransNeXtBlock(nn.Module):
         return x * gamma.view(1, -1, 1, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Attention 分支
+        # Attention branch
         shortcut = x
         y = self.attn(self.norm1(x))
         y = self._apply_gamma(y, self.gamma_1)
         x = shortcut + self.drop_path(y)
 
-        # ConvGLU MLP 分支
+        # ConvGLU MLP branch
         shortcut2 = x
         y2 = self.mlp(self.norm2(x))
         y2 = self._apply_gamma(y2, self.gamma_2)
@@ -401,8 +402,8 @@ class TransNeXtBlock(nn.Module):
 
 class TransNeXtStage(nn.Module):
     """
-    一个 Stage：若干个 TransNeXtBlock 的堆叠（不含下采样）。
-    下采样由骨干在 stage 之间单独控制。
+    One stage: a stack of several TransNeXtBlocks (without downsampling).
+    Downsampling is controlled separately between stages by the backbone.
     """
     def __init__(
         self,
@@ -445,22 +446,22 @@ class TransNeXtStage(nn.Module):
         return x
 
 # -------------------------------------------------------
-# 顶层骨干：TransNeXt-Backbone（替换原 MambaVision/CSDS-Backbone）
+# Top-level backbone: TransNeXt-Backbone (replacing the original MambaVision/CSDS-Backbone)
 # -------------------------------------------------------
 
 class MambaVision(nn.Module):
     """
-    TransNeXt Backbone（保持外部接口不变）：
-      - Stage1/2/3/4：TransNeXtStage（多头 Aggregated Attention + ConvGLU）
-      - 使用 PatchEmbed 进行 1/4 下采样，然后每个 stage 之间再做一次 stride=2 卷积下采样
-      - 分类模式下使用最后一个 stage 做全局池化 + 全连接
+    TransNeXt Backbone (keeping the external interface unchanged):
+      - Stage1/2/3/4: TransNeXtStage (multi-head Aggregated Attention + ConvGLU)
+      - Uses PatchEmbed for 1/4 downsampling, then applies one stride=2 convolutional downsampling between each stage
+      - In classification mode, uses the final stage output for global pooling + fully connected layer
     """
 
     def __init__(self,
                  dim=128,
                  in_dim=64,
                  depths=(3, 3, 10, 5),
-                 window_size=(8, 8, 14, 7),   # 仅为兼容保留，不再使用
+                 window_size=(8, 8, 14, 7),   # Kept only for compatibility; no longer used
                  mlp_ratio=4.0,
                  num_heads=(2, 4, 8, 16),
                  drop_path_rate=0.2,
@@ -473,25 +474,25 @@ class MambaVision(nn.Module):
                  layer_scale=None,
                  layer_scale_conv=None,
                  use_checkpoint=False,
-                 enable_pcs: bool = True,      # 仅为兼容参数，占位不用
-                 enable_sac: bool = True,      # 仅为兼容参数，占位不用
-                 enable_sl_bridge: bool = True,# 仅为兼容参数，占位不用
+                 enable_pcs: bool = True,      # Compatibility-only parameter, unused placeholder
+                 enable_sac: bool = True,      # Compatibility-only parameter, unused placeholder
+                 enable_sl_bridge: bool = True,# Compatibility-only parameter, unused placeholder
                  **kwargs):
         super().__init__()
         self.num_classes = num_classes
         self.patch_embed = PatchEmbed(in_chans=in_chans, in_dim=in_dim, dim=dim)
 
-        # 每个 stage 的通道数：dim, 2*dim, 4*dim, 8*dim
+        # Channel dimensions of each stage: dim, 2*dim, 4*dim, 8*dim
         self.num_stages = len(depths)
         self.dims = [int(dim * 2 ** i) for i in range(self.num_stages)]
         num_features = self.dims[-1]
 
-        # DropPath 分配
+        # DropPath allocation
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
 
-        # 下采样层（stage 之间）
+        # Downsampling layers (between stages)
         self.downsample_layers = nn.ModuleList()
-        # stage0: 不再额外下采样，由 patch_embed 完成
+        # stage0: no extra downsampling, handled by patch_embed
         self.downsample_layers.append(nn.Identity())
         for i in range(1, self.num_stages):
             in_c = self.dims[i - 1]
@@ -543,13 +544,13 @@ class MambaVision(nn.Module):
     def forward_features(self, x):
         # PatchEmbed: (B, 3, H, W) -> (B, C0, H/4, W/4)
         x = self.patch_embed(x)
-        # 多 stage 递进
+        # Multi-stage progression
         for i in range(self.num_stages):
             if i > 0:
                 x = self.downsample_layers[i](x)
             x = self.stages[i](x)
 
-        # 最后一层输出的通道即 num_features
+        # The channel dimension of the final output is num_features
         x = self.norm(x)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
@@ -564,13 +565,13 @@ class MambaVision(nn.Module):
         _load_checkpoint(self, pretrained, strict=strict)
 
 # -------------------------------------------------------
-# MMDet/MMseg 适配骨干（名称保持不变，仅内部改为 TransNeXt）
+# MMDet/MMseg compatible backbone (name kept unchanged, but internally replaced with TransNeXt)
 # -------------------------------------------------------
 
 @MODELS_MMSEG.register_module(name='MM_TransNeXt')
 @MODELS_MMDET.register_module(name='MM_TransNeXt')
 class MM_TransNeXt(MambaVision):
-    """适配 MMDetection 和 MMSegmentation 的 TransNeXt 骨干网络（兼容原 MM_mamba_vision 名称）。"""
+    """TransNeXt backbone adapted for MMDetection and MMSegmentation (compatible with the original MM_mamba_vision naming convention)."""
     def __init__(self, 
                  dim,
                  in_dim,
@@ -587,7 +588,8 @@ class MM_TransNeXt(MambaVision):
                  enable_sac: bool = True,
                  enable_sl_bridge: bool = True,
                  **kwargs):
-        # 保持参数接口不变，将 use_checkpoint 与各开关传递给父类（内部已忽略 enable_*）
+        # Keep the parameter interface unchanged, pass use_checkpoint and all switches to the parent class
+        # (the internal implementation already ignores enable_*)
         super().__init__(
             dim=dim,
             in_dim=in_dim,
@@ -602,7 +604,7 @@ class MM_TransNeXt(MambaVision):
             enable_sl_bridge=enable_sl_bridge,
             **kwargs,
         )
-        # 这里的 self.dims 在父类中已经构建为 [dim,2*dim,4*dim,8*dim,...]
+        # self.dims has already been built in the parent class as [dim, 2*dim, 4*dim, 8*dim, ...]
         self.channel_first = True
         _NORMLAYERS = dict(
             ln=nn.LayerNorm,
@@ -617,7 +619,7 @@ class MM_TransNeXt(MambaVision):
             layer_name = f'outnorm{i}'
             self.add_module(layer_name, layer)
 
-        # 顶层分类头对检测/分割不需要
+        # The top classification head is not needed for detection/segmentation
         del self.norm
         del self.head
         self.init_weights(pretrained)
@@ -635,18 +637,18 @@ class MM_TransNeXt(MambaVision):
             print(f"Failed loading checkpoint form {ckpt}: {e}")
     
     def init_weights(self, pretrained=None):
-        """初始化骨干网络的权重。"""
+        """Initialize the weights of the backbone network."""
         if isinstance(pretrained, str):
             load_checkpoint(self, pretrained, strict=False)
         elif pretrained is None:
-            # 父类在 __init__ 中已经调用了 apply(_init_weights)
+            # The parent class has already called apply(_init_weights) in __init__
             pass
         else:
             raise TypeError('pretrained must be a str or None')
 
     def forward(self, x):
         """
-        前向传播，返回多尺度特征图列表：
+        Forward pass, returning a list of multi-scale feature maps:
           - out[0]: C2
           - out[1]: C3
           - out[2]: C4
@@ -656,7 +658,7 @@ class MM_TransNeXt(MambaVision):
         x = self.patch_embed(x)  # (B, C0, H/4, W/4)
 
         outs = []
-        # 逐 stage 前向
+        # Forward through each stage
         for i, stage in enumerate(self.stages):
             if i > 0:
                 x = self.downsample_layers[i](x)
