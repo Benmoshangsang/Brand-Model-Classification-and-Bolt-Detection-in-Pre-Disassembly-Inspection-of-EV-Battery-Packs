@@ -57,23 +57,23 @@ class _EfficientNetFeatures(nn.Module):
     def __init__(
         self,
         model_name: str = 'efficientnet_b0',
-        # ！！！离线：强制不用外网权重
+        
         timm_pretrained: bool = False,
         out_indices: Tuple[int, int, int, int] = (0, 1, 2, 3),
         target_dims: Tuple[int, int, int, int] = (80, 160, 320, 640),
     ):
         super().__init__()
-        # 不从外网下载权重：pretrained=False
+       
         self.backbone = create_model(
             model_name,
-            pretrained=timm_pretrained,  # 离线场景保持 False
+            pretrained=timm_pretrained, 
             features_only=True,
-            out_indices=None  # 手动选择，避免不同 timm 版本差异
+            out_indices=None  # 
         )
 
         # Detect available feature channels from timm
         feat_chs: List[int] = list(self.backbone.feature_info.channels())
-        # 默认取最后 4 个阶段 (stride ~ 4/8/16/32)
+       
         if len(feat_chs) >= 4:
             self.pick = list(range(len(feat_chs) - 4, len(feat_chs)))
         else:
@@ -115,16 +115,16 @@ class MM_EfficientNet(nn.Module):
     """
     MMDetection/MMSegmentation-compatible EfficientNet backbone that outputs
     4 feature maps with channels [dim, 2*dim, 4*dim, 8*dim] (default dim=80).
-    CSDS 相关开关保留为兼容项，但在本实现中不使用（不会访问外网）。
+   
     """
     def __init__(
         self,
         dim: int = 80,
         out_indices: Tuple[int, int, int, int] = (0, 1, 2, 3),
-        pretrained: Optional[str] = None,          # 若为本地权重路径，会用 load_checkpoint 尝试加载
+        pretrained: Optional[str] = None,          
         norm_layer: str = "ln2d",
         model_name: str = "efficientnet_b0",
-        # 兼容你的配置文件的参数（本实现不使用）
+      
         depths: Tuple[int, int, int, int] = (1, 3, 8, 4),
         num_heads: Tuple[int, int, int, int] = (2, 4, 8, 16),
         window_size: Tuple[int, int, int, int] = (8, 8, 8, 8),
@@ -134,27 +134,27 @@ class MM_EfficientNet(nn.Module):
         enable_pcs: bool = True,
         enable_sac: bool = True,
         enable_sl_bridge: bool = False,
-        # 新增：如果你已经下载了 timm 的 EfficientNet 本地权重（state_dict），可在此传入路径
+      
         timm_checkpoint: Optional[str] = None,
-        # 新增：是否使用 timm 自带预训练（离线默认 False；仅当你在离线镜像内已有缓存可设 True）
+      
         timm_pretrained: bool = False,
     ):
         super().__init__()
         self.out_indices = out_indices
         self.dims = [int(dim * (2 ** i)) for i in range(4)]  # [80, 160, 320, 640] if dim=80
 
-        # 构建特征骨干（不访问外网）
+       
         self.feat = _EfficientNetFeatures(
             model_name=model_name,
-            timm_pretrained=bool(timm_pretrained),  # 离线默认 False
+            timm_pretrained=bool(timm_pretrained),  
             target_dims=tuple(self.dims)
         )
 
-        # 若提供 timm_checkpoint（本地 EfficientNet state_dict），优先载入到 self.feat.backbone
+     
         if isinstance(timm_checkpoint, str):
             try:
                 sd = torch.load(timm_checkpoint, map_location='cpu')
-                # 兼容 timm 的权重结构
+               
                 if isinstance(sd, dict) and 'state_dict' in sd:
                     sd = sd['state_dict']
                 missing, unexpected = self.feat.backbone.load_state_dict(sd, strict=False)
@@ -165,10 +165,10 @@ class MM_EfficientNet(nn.Module):
         # Per-stage normalization
         self.outnorms = nn.ModuleList([_make_norm(norm_layer, c) for c in self.dims])
 
-        # 记录通道排列
+       
         self.channel_first = True
 
-        # 如果传入了外部（本地）checkpoint，则尝试整体加载（包括 1x1 adapters 和 norms）
+      
         if isinstance(pretrained, str):
             load_checkpoint(self, pretrained, strict=False)
 
