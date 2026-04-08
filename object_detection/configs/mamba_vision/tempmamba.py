@@ -1,14 +1,6 @@
 # ========================
 # Dual-Task Detector Config (with brand top1/top5 + macro P/R/F1, det extra metrics)
-# ✅ 已修复：删除了 AdamW 中的 momentum 参数
-# ✅ 已修复：添加了 roi_feat_channels 参数以支持立即创建 FiLM 模块
-# ✅ 已修复：移除了 env_cfg.dist_cfg 中错误的 find_unused_parameters 参数
-# ✅ 已优化：统一了 model.train_cfg.rcnn 中的 sampler 数量
-# ✅【核心修复】修正了 backbone 配置，适配 mamba 纯 Mamba 主干
-# ✅【核心修复 & 加速】修正了不合理的超大 window_size
-# ✅【核心加速】禁用了梯度检查点，用显存换取速度
-# ✅【速度优化】将 SyncBN 替换为 GroupNorm，减少多卡通信开销
-# ✅【速度与指标修复】增大默认物理批次大小，并修复自定义评估器在验证时不工作的问题
+
 # ========================
 _base_ = [
     '../_base_/models/cascade-rcnn_r50_fpn.py',
