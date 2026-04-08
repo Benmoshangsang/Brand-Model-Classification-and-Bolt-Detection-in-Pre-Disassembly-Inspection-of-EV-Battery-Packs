@@ -9,6 +9,10 @@ from mmdet.structures import DetDataSample, SampleList
 
 @MODELS.register_module()
 class DualTaskDetector(CascadeRCNN):
+    """
+    A dual-task detector based on Cascade R-CNN that performs both 
+    object detection and image-level brand classification.
+    """
     def __init__(self,
                  backbone,
                  neck,
@@ -33,27 +37,31 @@ class DualTaskDetector(CascadeRCNN):
         )
 
         self.loss_weight_brand = loss_weight_brand
+        # Build brand_head if it's a config dict, otherwise use as is
         self.brand_head = MODELS.build(brand_head) if isinstance(brand_head, dict) else brand_head
 
     def loss(self, inputs: torch.Tensor, data_samples: SampleList) -> dict:
-        # 主任务：目标检测损失
+        """Calculate losses for both detection and brand classification."""
+        # Main Task: Object Detection Loss
         losses = super().loss(inputs, data_samples)
 
-        # 子任务：整图品牌分类损失
+        # Sub-task: Whole-image Brand Classification Loss
         if self.brand_head is not None:
             feats = self.extract_feat(inputs)
-            gap_feat = [f.mean(dim=[2, 3]) for f in feats]  # B×C
+            # Global Average Pooling (GAP) across spatial dimensions: BxCxHxW -> BxC
+            gap_feat = [f.mean(dim=[2, 3]) for f in feats]
             pooled_feat = sum(gap_feat) / len(gap_feat)
 
             cls_score = self.brand_head(pooled_feat)
 
-            # ✅ 从 metainfo 中读取 brand_label（每个为 [1] Tensor），拼接
+            # ✅ Retrieve brand_label from metainfo (expected as [1] Tensor per sample) and concatenate
             brand_labels = torch.cat([
                 sample.metainfo['brand_label'] for sample in data_samples
             ], dim=0).to(cls_score.device)
 
             loss_brand_cls = self.brand_head.loss(cls_score, brand_labels)
-            # ✅ 修复 KeyError：正确读取键 'loss_brand_cls'
+            
+            # ✅ Fix KeyError: Correctly access the key 'loss_brand_cls' from the head's loss dict
             losses['loss_brand_cls'] = loss_brand_cls['loss_brand_cls'] * self.loss_weight_brand
 
         return losses
@@ -62,6 +70,7 @@ class DualTaskDetector(CascadeRCNN):
                 inputs: torch.Tensor,
                 batch_data_samples: List[DetDataSample],
                 **kwargs) -> List[DetDataSample]:
+        """Predict detection results and brand scores."""
         results = super().predict(inputs, batch_data_samples=batch_data_samples, **kwargs)
 
         if self.brand_head is not None:
@@ -69,14 +78,18 @@ class DualTaskDetector(CascadeRCNN):
             gap_feat = [f.mean(dim=[2, 3]) for f in feats]
             pooled_feat = sum(gap_feat) / len(gap_feat)
 
-            brand_probs = self.brand_head.predict(pooled_feat)  # shape: [B, num_classes]
+            brand_probs = self.brand_head.predict(pooled_feat)  # Expected shape: [B, num_classes]
 
             for i, sample in enumerate(results):
-                # ✅ 获取目标设备
-                device = sample.pred_instances.bboxes.device if hasattr(sample.pred_instances, 'bboxes') else brand_probs[i].device
+                # ✅ Determine target device
+                if hasattr(sample.pred_instances, 'bboxes') and sample.pred_instances.bboxes.numel() > 0:
+                    device = sample.pred_instances.bboxes.device
+                else:
+                    device = brand_probs[i].device
+                
                 score_tensor = brand_probs[i].detach().to(device)
 
-                # ✅ 正确写入 brand_score 到 pred_instances（非 sample 本体）
+                # ✅ Correctly write brand_score to pred_instances (rather than the sample root)
                 sample.pred_instances.set_field(score_tensor, name='brand_score', dtype=torch.Tensor)
 
         return results
